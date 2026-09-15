@@ -76,7 +76,7 @@ export async function call(name, args, directory = preferencesDirectory) {
 }
 
 export function createServer({ preferencesDirectory: directory = preferencesDirectory } = {}) {
-  const server = new McpServer({ name: 'git-graph', title: 'Git Graph', version: '0.2.0' });
+  const server = new McpServer({ name: 'git-graph', title: 'Git Graph', version: '0.2.1' });
   for (const [name, definition] of Object.entries(definitions)) {
     registerAppTool(server, name, { title: definition.title, description: definition.description || definition.title,
       inputSchema: definition.schema, annotations: definition.annotations || annotations,

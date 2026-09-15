@@ -1,13 +1,14 @@
 {
   "name": "git-graph",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
     "test": "node --test test.mjs",
     "test:installed": "node --test installed.test.mjs",
-    "start": "node dist/server.mjs"
+    "start": "node dist/server.mjs",
+    "test:ui": "node ui.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "2.0.0",

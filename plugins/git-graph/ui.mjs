@@ -4,7 +4,7 @@ import { layout, colors } from './graph.mjs';
 import { columns, maxColumnWidth, widthsSchema } from './column-layout.mjs';
 
 const $ = id => document.getElementById(id);
-const app = new App({ name: 'Git Graph', version: '0.2.0' });
+const app = new App({ name: 'Git Graph', version: '0.2.1' });
 const state = { repo: '', commits: [], refs: [], tips: [], selected: '', detail: null, file: '', matches: [], match: -1,
   hasMore: false, historyVersion: 0, detailVersion: 0, diffVersion: 0, connected: false, loading: false };
 let retry = null;
@@ -68,6 +68,9 @@ for (const [index, column] of columns.entries()) {
   handle.title = '拖动调整列宽；双击恢复自动宽度；方向键微调';
   cell.append(handle);
   const resize = width => {
+    if (column.id !== 'message' && columnWidths.message == null) {
+      columnWidths.message = Math.round($('columns').children[1].getBoundingClientRect().width);
+    }
     columnWidths[column.id] = Math.min(maxColumnWidth, Math.max(columnMinimum(column), Math.round(width)));
     applyColumnWidths(); updateResizeHandles();
   };
@@ -78,7 +81,7 @@ for (const [index, column] of columns.entries()) {
     event.preventDefault();
     handle.focus({ preventScroll: true });
     drag = { pointer: event.pointerId, x: event.clientX, scroll: $('history-scroll').scrollLeft,
-      width: cell.getBoundingClientRect().width, previous: columnWidths[column.id] };
+      width: cell.getBoundingClientRect().width, previous: { ...columnWidths } };
     handle.setPointerCapture(event.pointerId);
     handle.dataset.active = ''; document.documentElement.classList.add('resizing');
   });
@@ -90,9 +93,9 @@ for (const [index, column] of columns.entries()) {
     const previous = drag.previous; drag = null;
     delete handle.dataset.active; document.documentElement.classList.remove('resizing');
     if (cancelled) {
-      if (previous == null) delete columnWidths[column.id]; else columnWidths[column.id] = previous;
+      columnWidths = previous;
       applyColumnWidths(); updateResizeHandles();
-    } else if (previous !== columnWidths[column.id]) saveColumnWidths();
+    } else if (columns.some(({ id }) => previous[id] !== columnWidths[id])) saveColumnWidths();
   };
   handle.addEventListener('pointerup', () => finish(false));
   handle.addEventListener('pointercancel', () => finish(true));

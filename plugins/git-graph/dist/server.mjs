@@ -33945,7 +33945,7 @@ async function call(name, args, directory = preferencesDirectory) {
   }
 }
 function createServer({ preferencesDirectory: directory = preferencesDirectory } = {}) {
-  const server = new McpServer({ name: "git-graph", title: "Git Graph", version: "0.2.0" });
+  const server = new McpServer({ name: "git-graph", title: "Git Graph", version: "0.2.1" });
   for (const [name, definition] of Object.entries(definitions)) {
     j(server, name, {
       title: definition.title,
