@@ -75,8 +75,16 @@ button svg { width: 16px; height: 16px; flex: none }
 .error span { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere }
 #content { display: flex; flex: 1; min-height: 0 }
 #history-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0 }
-.columns, .commit-row { display: grid; grid-template-columns: var(--graph-width, 20px) minmax(180px, 1fr) 100px 60px 64px; align-items: center; gap: 8px; padding: 0 12px 0 8px; min-width: 488px }
+#history-table { width: 100%; min-width: var(--table-min-width, 476px) }
+.columns, .commit-row { display: grid; grid-template-columns: var(--graph-width, 20px) var(--message-width, minmax(180px, 1fr)) var(--author-width, 100px) var(--date-width, 60px) var(--hash-width, 64px); align-items: center; justify-content: start; gap: 8px; padding: 0 12px 0 8px; width: 100% }
 .columns { height: 26px; font-size: var(--font-text-xs-size, 12px); font-weight: var(--font-weight-normal, 400); color: var(--muted); background: var(--bg); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 1 }
+.columns > span { position: relative; min-width: 0; align-self: stretch; display: flex; align-items: center }
+.column-resize { position: absolute; top: 0; bottom: 0; right: -8px; width: 16px; cursor: col-resize; touch-action: none; user-select: none }
+.column-resize::after { content: ''; position: absolute; top: 5px; bottom: 5px; left: 8px; width: 1px; background: var(--border) }
+.column-resize:hover::after, .column-resize:focus-visible::after, .resizing .column-resize[data-active]::after { background: var(--accent) }
+.column-resize:focus-visible { outline: none }
+.column-resize[aria-disabled=true] { pointer-events: none }
+.resizing, .resizing * { cursor: col-resize !important; user-select: none !important }
 #history-scroll { flex: 1; overflow: auto; position: relative }
 #rows { width: 100% }
 .commit-row { height: 28px; width: 100%; border-radius: 0; text-align: left; background: transparent; white-space: nowrap }
@@ -87,7 +95,7 @@ button svg { width: 16px; height: 16px; flex: none }
 .commit-row .message { display: flex; align-items: center; min-width: 0; gap: 6px; overflow: hidden }
 .subject { overflow: hidden; text-overflow: ellipsis }
 .author { overflow: hidden; text-overflow: ellipsis; color: var(--muted) }
-.date, .hash { color: var(--muted); font-variant-numeric: tabular-nums; font-size: var(--font-text-xs-size, 12px) }
+.date, .hash { color: var(--muted); font-variant-numeric: tabular-nums; font-size: var(--font-text-xs-size, 12px); overflow: hidden; text-overflow: ellipsis }
 .hash, code, pre { font-family: var(--font-mono, 'SFMono-Regular', Consolas, monospace) }
 .ref { flex: none; font-size: var(--font-text-xs-size, 12px); line-height: 18px; height: 18px; border-radius: var(--border-radius-xs, 4px); padding: 0 5px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; background: var(--hover); color: var(--muted) }
 .ref.tag { color: var(--warning) }
@@ -134,8 +142,6 @@ button svg { width: 16px; height: 16px; flex: none }
 }
 @media (max-width: 540px) {
   #search-count { font-size: var(--font-text-xs-size, 12px) }
-  .columns, .commit-row { grid-template-columns: var(--graph-width, 20px) minmax(180px, 1fr) 64px; min-width: 300px }
-  .columns > :nth-child(3), .columns > :nth-child(4), .commit-row .author, .commit-row .date { display: none }
 }
 </style>
 </head>
@@ -153,10 +159,11 @@ button svg { width: 16px; height: 16px; flex: none }
     <button class="step" id="next-match" title="下一个匹配" aria-label="下一个匹配"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 4v12m-5-5 5 5 5-5"/></svg></button>
   </div>
   <div id="error" class="error" role="alert" hidden><span></span><button id="retry">重试</button><button id="dismiss-error" aria-label="关闭错误">×</button></div>
+  <div id="layout-error" class="error" role="alert" hidden><span></span><button id="layout-retry">重试</button></div>
   <div id="content">
     <section id="history-pane" aria-label="提交历史">
-      <div id="history-scroll"><div id="columns" class="columns" hidden><span aria-label="关系图"></span><span>提交</span><span>作者</span><span>日期</span><span>SHA</span></div><div id="rows" role="listbox" aria-label="Git 提交列表"></div><div id="empty" class="empty"><strong>正在读取当前任务的 Git 仓库</strong>浏览分支关系，选择提交查看文件差异。</div></div>
-      <footer class="history-footer"><span id="history-status" role="status">正在读取当前任务仓库…</span><span class="readonly" title="Git Graph 0.1.5 · 所有操作仅读取本地 Git 数据">只读</span><button id="load-more" hidden>加载更多</button></footer>
+      <div id="history-scroll"><div id="history-table"><div id="columns" class="columns" hidden><span aria-label="关系图"></span><span>提交</span><span>作者</span><span>日期</span><span>SHA</span></div><div id="rows" role="listbox" aria-label="Git 提交列表"></div></div><div id="empty" class="empty"><strong>正在读取当前任务的 Git 仓库</strong>浏览分支关系，选择提交查看文件差异。</div></div>
+      <footer class="history-footer"><span id="history-status" role="status">正在读取当前任务仓库…</span><span class="readonly" title="Git Graph 0.2.0 · 所有 Git 操作只读">只读</span><button id="load-more" hidden>加载更多</button></footer>
     </section>
     <aside id="detail" aria-label="提交详情" hidden>
       <div id="detail-header"><code id="detail-hash"></code><button id="copy-hash" title="复制完整提交 SHA">复制</button><button id="close-detail" aria-label="关闭提交详情">×</button></div>

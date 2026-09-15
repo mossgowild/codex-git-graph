@@ -33683,8 +33683,10 @@ function G(B, Q, F, V, q) {
 }
 
 // server.mjs
-import { readFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 // git.mjs
@@ -33847,11 +33849,49 @@ async function workspaceFile(args) {
   return { path };
 }
 
+// column-layout.mjs
+var columns = [
+  { id: "graph", label: "\u5173\u7CFB\u56FE", min: 20, initial: 20 },
+  { id: "message", label: "\u63D0\u4EA4", min: 100, initial: 180 },
+  { id: "author", label: "\u4F5C\u8005", min: 56, initial: 100 },
+  { id: "date", label: "\u65E5\u671F", min: 48, initial: 60 },
+  { id: "hash", label: "SHA", min: 56, initial: 64 }
+];
+var maxColumnWidth = 2400;
+var widthsSchema = external_exports.strictObject(Object.fromEntries(columns.map((column) => [column.id, external_exports.number().int().min(column.min).max(maxColumnWidth).optional()])));
+
 // server.mjs
 var html = await readFile(new URL("./window.html", import.meta.url), "utf8");
 var resourceUri = `ui://git-graph/window-${createHash("sha256").update(html).digest("hex").slice(0, 16)}.html`;
 var hash2 = external_exports.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/);
 var annotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+var preferencesDirectory = join(
+  process.env.CODEX_HOME || join(homedir(), ".codex"),
+  "plugins/data/git-graph-codex-git-graph"
+);
+async function readLayout({ preferencesDirectory: preferencesDirectory2 }) {
+  try {
+    return { widths: widthsSchema.parse(JSON.parse(await readFile(join(preferencesDirectory2, "column-widths.json"), "utf8"))) };
+  } catch (error62) {
+    if (error62.code === "ENOENT") return { widths: {} };
+    throw new Error(`\u8BFB\u53D6\u5217\u5BBD\u5E03\u5C40\u5931\u8D25\uFF1A${error62.message}`);
+  }
+}
+async function saveLayout({ widths, preferencesDirectory: preferencesDirectory2 }) {
+  const temporary = join(preferencesDirectory2, `column-widths.${randomUUID()}.tmp`);
+  try {
+    await mkdir(preferencesDirectory2, { recursive: true });
+    try {
+      await writeFile(temporary, JSON.stringify(widths) + "\n", { mode: 384, flag: "wx" });
+      await rename(temporary, join(preferencesDirectory2, "column-widths.json"));
+    } finally {
+      await rm(temporary, { force: true });
+    }
+    return { widths };
+  } catch (error62) {
+    throw new Error(`\u4FDD\u5B58\u5217\u5BBD\u5E03\u5C40\u5931\u8D25\uFF1A${error62.message}`);
+  }
+}
 async function openGraph() {
   const cwd = process.cwd();
   try {
@@ -33884,32 +33924,40 @@ var definitions = {
     hash: hash2,
     parent: external_exports.number().int().min(0).optional(),
     path: external_exports.string().min(1).max(4096)
-  }), run: workspaceFile }
+  }), run: workspaceFile },
+  git_graph_layout: { title: "\u8BFB\u53D6\u5217\u5BBD\u5E03\u5C40", schema: external_exports.strictObject({}), run: readLayout },
+  git_graph_save_layout: {
+    title: "\u4FDD\u5B58\u5217\u5BBD\u5E03\u5C40",
+    description: "Save global Git Graph column widths in plugin data. Does not modify Git repositories.",
+    schema: external_exports.strictObject({ widths: widthsSchema }),
+    run: saveLayout,
+    annotations: { ...annotations, readOnlyHint: false }
+  }
 };
-async function call(name, args) {
+async function call(name, args, directory = preferencesDirectory) {
   try {
     const definition = definitions[name];
     if (!definition) throw new Error("\u672A\u77E5\u7684 Git Graph \u64CD\u4F5C\u3002");
-    const data = await definition.run({ ...definition.schema.parse(args), repoPath: process.cwd() });
-    return { content: [{ type: "text", text: name === "git_graph" ? "Git Graph \u7A97\u53E3\u6570\u636E\u5DF2\u51C6\u5907\u3002" : "\u53EA\u8BFB\u67E5\u8BE2\u5B8C\u6210\u3002" }], structuredContent: data };
+    const data = await definition.run({ ...definition.schema.parse(args), repoPath: process.cwd(), preferencesDirectory: directory });
+    return { content: [{ type: "text", text: "Git Graph \u64CD\u4F5C\u5B8C\u6210\u3002" }], structuredContent: data };
   } catch (error62) {
     return { isError: true, content: [{ type: "text", text: error62.message }] };
   }
 }
-function createServer() {
-  const server = new McpServer({ name: "git-graph", title: "Git Graph", version: "0.1.5" });
+function createServer({ preferencesDirectory: directory = preferencesDirectory } = {}) {
+  const server = new McpServer({ name: "git-graph", title: "Git Graph", version: "0.2.0" });
   for (const [name, definition] of Object.entries(definitions)) {
     j(server, name, {
       title: definition.title,
       description: definition.description || definition.title,
       inputSchema: definition.schema,
-      annotations,
+      annotations: definition.annotations || annotations,
       _meta: name === "git_graph" ? {
         ui: { resourceUri, visibility: ["app", "model"] },
         // Codex Desktop 26.908 supports these window entrypoints; keep standard MCP UI metadata too.
         "openai/ui": { entrypoints: [{ type: "thread" }], preferredModelDisplayMode: "fullscreen" }
       } : { ui: { visibility: ["app"] } }
-    }, (args) => call(name, args));
+    }, (args) => call(name, args, directory));
   }
   G(server, "Git Graph", resourceUri, { mimeType: L }, async () => ({ contents: [{
     uri: resourceUri,

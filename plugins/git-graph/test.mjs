@@ -170,3 +170,57 @@ test('changed UI content gets a new host cache identity', async () => {
     assert.notEqual(uris[0], uris[1], 'a host must not reuse the previous UI after an update');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('column layout persists across MCP processes and repositories with bounded app-only writes', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'git-graph-layout-'));
+  const data = join(directory, 'data');
+  const settings = join(data, 'column-widths.json');
+  const runner = join(directory, 'server.mjs');
+  const clients = [];
+  try {
+    await writeFile(runner, `import { createServer } from ${JSON.stringify(new URL('./dist/server.mjs', import.meta.url).href)};
+import { StdioServerTransport } from ${JSON.stringify(import.meta.resolve('@modelcontextprotocol/server/stdio'))};
+await createServer({ preferencesDirectory: ${JSON.stringify(data)} }).connect(new StdioServerTransport());`);
+    const connect = async cwd => {
+      const client = new Client({ name: 'layout-test', version: '1.0.0' });
+      clients.push(client);
+      await client.connect(new StdioClientTransport({ command: process.execPath, args: [runner], cwd }));
+      return client;
+    };
+    const first = await connect(import.meta.dirname);
+    const { tools } = await first.listTools();
+    const save = tools.find(tool => tool.name === 'git_graph_save_layout');
+    assert.equal(save.annotations.readOnlyHint, false);
+    assert.equal(save.annotations.destructiveHint, false);
+    assert.deepEqual(save._meta.ui.visibility, ['app']);
+    assert.ok(tools.filter(tool => tool !== save).every(tool => tool.annotations.readOnlyHint));
+    assert.deepEqual((await first.callTool({ name: 'git_graph_layout', arguments: {} })).structuredContent, { widths: {} });
+    const widths = { graph: 100, message: 720, author: 160, date: 90, hash: 100 };
+    assert.ok(!(await first.callTool({ name: 'git_graph_save_layout', arguments: { widths } })).isError);
+    await first.close();
+    const second = await connect(directory);
+    assert.deepEqual((await second.callTool({ name: 'git_graph_layout', arguments: {} })).structuredContent, { widths });
+    const saved = await readFile(settings, 'utf8');
+    for (const args of [{ widths: { graph: -1 } }, { widths: { message: 99 } }, { widths: { author: 2401 } },
+      { widths: { date: 64.5 } }, { widths: { hash: '80' } }, { widths: { extra: 100 } },
+      { widths: {}, preferencesDirectory: directory }, { widths: {}, repoPath: directory }]) {
+      assert.equal((await second.callTool({ name: 'git_graph_save_layout', arguments: args })).isError, true);
+      assert.equal(await readFile(settings, 'utf8'), saved);
+    }
+    await writeFile(settings, '{broken');
+    const invalid = await second.callTool({ name: 'git_graph_layout', arguments: {} });
+    assert.equal(invalid.isError, true);
+    assert.match(invalid.content[0].text, /读取列宽布局失败/);
+    assert.equal(await readFile(settings, 'utf8'), '{broken');
+    assert.ok(!(await second.callTool({ name: 'git_graph_save_layout', arguments: { widths: {} } })).isError);
+    await second.close();
+    const third = await connect(import.meta.dirname);
+    assert.deepEqual((await third.callTool({ name: 'git_graph_layout', arguments: {} })).structuredContent, { widths: {} });
+    await rm(data, { recursive: true }); await writeFile(data, 'not a directory');
+    assert.equal((await third.callTool({ name: 'git_graph_save_layout', arguments: { widths } })).isError, true);
+    assert.equal(await readFile(data, 'utf8'), 'not a directory');
+  } finally {
+    for (const client of clients) await client.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

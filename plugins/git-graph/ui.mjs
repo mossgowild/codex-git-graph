@@ -1,12 +1,117 @@
 import { App, applyDocumentTheme, applyHostStyleVariables } from '@modelcontextprotocol/ext-apps';
 import { z } from 'zod';
 import { layout, colors } from './graph.mjs';
+import { columns, maxColumnWidth, widthsSchema } from './column-layout.mjs';
 
 const $ = id => document.getElementById(id);
-const app = new App({ name: 'Git Graph', version: '0.1.5' });
+const app = new App({ name: 'Git Graph', version: '0.2.0' });
 const state = { repo: '', commits: [], refs: [], tips: [], selected: '', detail: null, file: '', matches: [], match: -1,
   hasMore: false, historyVersion: 0, detailVersion: 0, diffVersion: 0, connected: false, loading: false };
 let retry = null;
+let columnWidths = {}, graphWidth = 20, layoutReady = false, layoutRetry = null;
+let saveQueue = Promise.resolve(), saveVersion = 0;
+
+function applyColumnWidths() {
+  let minimum = 20 + (columns.length - 1) * 8;
+  for (const column of columns) {
+    let width = columnWidths[column.id];
+    if (column.id === 'graph') width = Math.max(graphWidth, width || 0);
+    minimum += width ?? column.initial;
+    if (width == null) $('history-pane').style.removeProperty(`--${column.id}-width`);
+    else $('history-pane').style.setProperty(`--${column.id}-width`, `${width}px`);
+  }
+  $('history-pane').style.setProperty('--table-min-width', `${minimum}px`);
+}
+function layoutError(message, action) {
+  $('layout-error').hidden = false;
+  $('layout-error').querySelector('span').textContent = message;
+  layoutRetry = action;
+}
+async function loadColumnWidths() {
+  try {
+    const result = await call('git_graph_layout', {});
+    columnWidths = widthsSchema.parse(result.widths);
+    layoutReady = true;
+    applyColumnWidths();
+    $('layout-error').hidden = true;
+    updateResizeHandles();
+  } catch (e) { layoutError(`无法读取已保存的布局。${e.message}`, loadColumnWidths); }
+}
+function saveColumnWidths() {
+  const widths = { ...columnWidths }, version = ++saveVersion;
+  saveQueue = saveQueue.then(async () => {
+    try {
+      await call('git_graph_save_layout', { widths });
+      if (version === saveVersion) $('layout-error').hidden = true;
+    } catch (e) {
+      if (version === saveVersion) layoutError(`列宽尚未保存。${e.message}`, saveColumnWidths);
+    }
+  });
+  return saveQueue;
+}
+function columnMinimum(column) { return column.id === 'graph' ? Math.max(column.min, graphWidth) : column.min; }
+function updateResizeHandles() {
+  for (const [index, column] of columns.entries()) {
+    const cell = $('columns').children[index], handle = cell.querySelector('.column-resize');
+    handle.setAttribute('aria-valuenow', Math.round(cell.getBoundingClientRect().width));
+    handle.setAttribute('aria-valuemin', columnMinimum(column));
+    handle.setAttribute('aria-valuemax', Math.max(maxColumnWidth, columnMinimum(column)));
+    handle.setAttribute('aria-disabled', String(!layoutReady));
+    handle.tabIndex = layoutReady ? 0 : -1;
+  }
+}
+for (const [index, column] of columns.entries()) {
+  const cell = $('columns').children[index], handle = node('span', null, 'column-resize');
+  handle.role = 'separator'; handle.dataset.column = column.id;
+  handle.setAttribute('aria-label', `调整${column.label}列宽`);
+  handle.setAttribute('aria-orientation', 'vertical');
+  handle.title = '拖动调整列宽；双击恢复自动宽度；方向键微调';
+  cell.append(handle);
+  const resize = width => {
+    columnWidths[column.id] = Math.min(maxColumnWidth, Math.max(columnMinimum(column), Math.round(width)));
+    applyColumnWidths(); updateResizeHandles();
+  };
+  const reset = () => { delete columnWidths[column.id]; applyColumnWidths(); updateResizeHandles(); saveColumnWidths(); };
+  let drag = null;
+  handle.addEventListener('pointerdown', event => {
+    if (!layoutReady || event.button !== 0 || drag) return;
+    event.preventDefault();
+    handle.focus({ preventScroll: true });
+    drag = { pointer: event.pointerId, x: event.clientX, scroll: $('history-scroll').scrollLeft,
+      width: cell.getBoundingClientRect().width, previous: columnWidths[column.id] };
+    handle.setPointerCapture(event.pointerId);
+    handle.dataset.active = ''; document.documentElement.classList.add('resizing');
+  });
+  handle.addEventListener('pointermove', event => {
+    if (drag?.pointer === event.pointerId) resize(drag.width + event.clientX - drag.x + $('history-scroll').scrollLeft - drag.scroll);
+  });
+  const finish = cancelled => {
+    if (!drag) return;
+    const previous = drag.previous; drag = null;
+    delete handle.dataset.active; document.documentElement.classList.remove('resizing');
+    if (cancelled) {
+      if (previous == null) delete columnWidths[column.id]; else columnWidths[column.id] = previous;
+      applyColumnWidths(); updateResizeHandles();
+    } else if (previous !== columnWidths[column.id]) saveColumnWidths();
+  };
+  handle.addEventListener('pointerup', () => finish(false));
+  handle.addEventListener('pointercancel', () => finish(true));
+  handle.addEventListener('lostpointercapture', () => finish(true));
+  handle.addEventListener('dblclick', () => { if (layoutReady) reset(); });
+  handle.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && drag) { event.preventDefault(); event.stopPropagation(); finish(true); return; }
+    if (!layoutReady || drag) return;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      resize(cell.getBoundingClientRect().width + (event.key === 'ArrowRight' ? 1 : -1) * (event.shiftKey ? 1 : 8));
+      saveColumnWidths();
+    } else if (event.key === 'Home') { event.preventDefault(); reset(); }
+  });
+}
+const columnsObserver = new ResizeObserver(updateResizeHandles);
+for (const cell of $('columns').children) columnsObserver.observe(cell);
+updateResizeHandles();
+$('layout-retry').addEventListener('click', () => layoutRetry?.());
 
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -110,7 +215,8 @@ function graphSvg(row, width) {
 function renderHistory() {
   const graph = layout(state.commits);
   const width = graph.width * 18 + 2;
-  $('history-pane').style.setProperty('--graph-width', `${width}px`);
+  graphWidth = width;
+  applyColumnWidths();
   const refs = new Map();
   for (const ref of state.refs) { if (!refs.has(ref.hash)) refs.set(ref.hash, []); refs.get(ref.hash).push(ref); }
   const fragment = document.createDocumentFragment();
@@ -311,10 +417,14 @@ app.ontoolresult = result => {
     $('history-status').textContent = '当前任务没有可显示的 Git 历史';
   }
 };
-app.onteardown = async () => { ++state.historyVersion; ++state.detailVersion; ++state.diffVersion; return {}; };
+app.onteardown = async () => {
+  ++state.historyVersion; ++state.detailVersion; ++state.diffVersion;
+  columnsObserver.disconnect(); await saveQueue; return {};
+};
 app.connect().then(() => {
   state.connected = true; theme(app.getHostContext() || {});
   $('open-file').hidden = !app.getHostCapabilities()?.experimental?.['openai/files'];
+  loadColumnWidths();
 }).catch(e => {
   $('history-status').textContent = '连接失败'; error(e.message, null);
 });
