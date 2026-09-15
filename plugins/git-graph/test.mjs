@@ -91,6 +91,14 @@ test('real Git history, merge parents, renames, paths, pagination, read-only sta
     assert.deepEqual(await readFile(join(repo, '.git/index')), indexBefore);
     assert.deepEqual(await readFile(join(repo, '.git/logs/HEAD')), logBefore);
     await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(import.meta.dirname, 'dist/server.mjs')], cwd: repo }));
+    const icons = client.getServerVersion().icons;
+    assert.deepEqual(icons.map(icon => icon.theme), ['light', 'dark']);
+    for (const icon of icons) {
+      assert.equal(icon.mimeType, 'image/svg+xml');
+      assert.match(icon.src, /^data:image\/svg\+xml[;,]/);
+      const asset = `./assets/git-branch${icon.theme === 'dark' ? '-dark' : ''}.svg`;
+      assert.equal(await (await fetch(icon.src)).text(), await readFile(new URL(asset, import.meta.url), 'utf8'));
+    }
     const tools = await client.listTools();
     const tool = tools.tools.find(tool => tool.name === 'git_graph');
     assert.deepEqual(tool._meta['openai/ui'].entrypoints, [{ type: 'thread' }]);

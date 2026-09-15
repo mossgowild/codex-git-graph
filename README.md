@@ -5,6 +5,7 @@
 - 提交关系图、本地及远程分支、标签筛选。
 - 搜索已加载的提交，查看提交详情、文件差异及合并父节点。
 - 跟随 Codex 的颜色、字体与主题，支持窄面板和键盘导航。
+- 插件列表与任务侧面板使用统一的 Git 分支图标，适配浅色、深色主题。
 - 拖动表头分隔线调整各列宽度，跨任务、重启及插件更新保留布局。
 - 自动使用当前任务目录及 linked worktree，不提供仓库切换。
 - 宿主支持时，可将工作区当前文件打开到 Codex 原生文件面板。
@@ -61,7 +62,7 @@ npm run build
 npm test
 ```
 
-源码和构建产物都在 `plugins/git-graph/`；仓库市场入口位于 `.agents/plugins/marketplace.json`。发布修改时一起提交更新后的 `dist/` 和 `.mcp.json`。图布局、SVG 与界面为本地实现，第三方 SDK 负责 MCP 和宿主通信。
+源码和构建产物都在 `plugins/git-graph/`；仓库市场入口位于 `.agents/plugins/marketplace.json`。发布修改时一起提交更新后的 `dist/` 和 `.mcp.json`。图布局、SVG 与界面为本地实现，第三方 SDK 负责 MCP 和宿主通信。图标源文件位于 `assets/`，插件清单引用 SVG，构建时将同一组图标内嵌到 MCP `serverInfo.icons`，不发起图标网络请求。
 
 当前 Codex 兼容格式不会展开 MCP 参数中的 `${PLUGIN_ROOT}`。构建脚本按插件清单版本生成启动命令，从 `CODEX_HOME`（未设置时为 `~/.codex`）下的 `plugins/cache/codex-git-graph/git-graph/<version>/` 加载插件，保持进程工作目录为当前任务目录。这依赖 Codex 的缓存目录结构；以后宿主支持直接传入插件路径且保留任务目录时应替换。修改清单版本后需要重新构建；不要单独复制 `.mcp.json` 到别的市场。
 

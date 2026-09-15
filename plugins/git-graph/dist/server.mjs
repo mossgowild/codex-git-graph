@@ -33860,6 +33860,12 @@ var columns = [
 var maxColumnWidth = 2400;
 var widthsSchema = external_exports.strictObject(Object.fromEntries(columns.map((column) => [column.id, external_exports.number().int().min(column.min).max(maxColumnWidth).optional()])));
 
+// assets/git-branch.svg
+var git_branch_default = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="%231f2328" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">%0A  <path d="M5.5 6.75v6.5m9-6.5v.75a5 5 0 0 1-5 5h-4"/>%0A  <circle cx="5.5" cy="4.5" r="2.25"/>%0A  <circle cx="5.5" cy="15.5" r="2.25"/>%0A  <circle cx="14.5" cy="4.5" r="2.25"/>%0A</svg>%0A';
+
+// assets/git-branch-dark.svg
+var git_branch_dark_default = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="%23e6edf3" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">%0A  <path d="M5.5 6.75v6.5m9-6.5v.75a5 5 0 0 1-5 5h-4"/>%0A  <circle cx="5.5" cy="4.5" r="2.25"/>%0A  <circle cx="5.5" cy="15.5" r="2.25"/>%0A  <circle cx="14.5" cy="4.5" r="2.25"/>%0A</svg>%0A';
+
 // server.mjs
 var html = await readFile(new URL("./window.html", import.meta.url), "utf8");
 var resourceUri = `ui://git-graph/window-${createHash("sha256").update(html).digest("hex").slice(0, 16)}.html`;
@@ -33945,7 +33951,10 @@ async function call(name, args, directory = preferencesDirectory) {
   }
 }
 function createServer({ preferencesDirectory: directory = preferencesDirectory } = {}) {
-  const server = new McpServer({ name: "git-graph", title: "Git Graph", version: "0.2.1" });
+  const server = new McpServer({ name: "git-graph", title: "Git Graph", version: "0.2.1", icons: [
+    { src: git_branch_default, mimeType: "image/svg+xml", sizes: ["any"], theme: "light" },
+    { src: git_branch_dark_default, mimeType: "image/svg+xml", sizes: ["any"], theme: "dark" }
+  ] });
   for (const [name, definition] of Object.entries(definitions)) {
     j(server, name, {
       title: definition.title,

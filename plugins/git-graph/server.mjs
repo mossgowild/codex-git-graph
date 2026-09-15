@@ -9,6 +9,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { history, commit, diff, workspaceFile } from './git.mjs';
 import { widthsSchema } from './column-layout.mjs';
+import lightIcon from './assets/git-branch.svg';
+import darkIcon from './assets/git-branch-dark.svg';
 
 const html = await readFile(new URL('./window.html', import.meta.url), 'utf8');
 // Hosts cache UI by resource URI. Changed content must have a different identity.
@@ -76,7 +78,10 @@ export async function call(name, args, directory = preferencesDirectory) {
 }
 
 export function createServer({ preferencesDirectory: directory = preferencesDirectory } = {}) {
-  const server = new McpServer({ name: 'git-graph', title: 'Git Graph', version: '0.2.1' });
+  const server = new McpServer({ name: 'git-graph', title: 'Git Graph', version: '0.2.1', icons: [
+    { src: lightIcon, mimeType: 'image/svg+xml', sizes: ['any'], theme: 'light' },
+    { src: darkIcon, mimeType: 'image/svg+xml', sizes: ['any'], theme: 'dark' },
+  ] });
   for (const [name, definition] of Object.entries(definitions)) {
     registerAppTool(server, name, { title: definition.title, description: definition.description || definition.title,
       inputSchema: definition.schema, annotations: definition.annotations || annotations,

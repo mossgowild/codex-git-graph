@@ -5,7 +5,7 @@ await mkdir('dist', { recursive: true });
 const ui = await build({ entryPoints: ['ui.mjs'], bundle: true, minify: true, format: 'iife', platform: 'browser', write: false });
 const html = (await readFile('window.html', 'utf8')).replace('/* APP_SCRIPT */', () => ui.outputFiles[0].text.replaceAll('</script', '<\\/script'));
 await writeFile('dist/window.html', html);
-await build({ entryPoints: ['server.mjs'], bundle: true, platform: 'node', format: 'esm', target: 'node20', outfile: 'dist/server.mjs',
+await build({ entryPoints: ['server.mjs'], bundle: true, platform: 'node', format: 'esm', target: 'node20', outfile: 'dist/server.mjs', loader: { '.svg': 'dataurl' },
   banner: { js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);" } });
 const { version } = JSON.parse(await readFile('.codex-plugin/plugin.json', 'utf8'));
 // ponytail: legacy MCP has no plugin-root expansion; replace this cache lookup when the host supports it without changing the task cwd.
