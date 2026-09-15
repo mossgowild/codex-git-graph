@@ -56,7 +56,9 @@ npm run build
 npm test
 ```
 
-源码和构建产物都在 `plugins/git-graph/`；仓库市场入口位于 `.agents/plugins/marketplace.json`。发布修改时一起提交更新后的 `dist/`。图布局、SVG 与界面为本地实现，第三方 SDK 负责 MCP 和宿主通信。
+源码和构建产物都在 `plugins/git-graph/`；仓库市场入口位于 `.agents/plugins/marketplace.json`。发布修改时一起提交更新后的 `dist/` 和 `.mcp.json`。图布局、SVG 与界面为本地实现，第三方 SDK 负责 MCP 和宿主通信。
+
+当前 Codex 兼容格式不会展开 MCP 参数中的 `${PLUGIN_ROOT}`。构建脚本按插件清单版本生成启动命令，从 `CODEX_HOME`（未设置时为 `~/.codex`）下的 `plugins/cache/codex-git-graph/git-graph/<version>/` 加载插件，保持进程工作目录为当前任务目录。这依赖 Codex 的缓存目录结构；以后宿主支持直接传入插件路径且保留任务目录时应替换。修改清单版本后需要重新构建；不要单独复制 `.mcp.json` 到别的市场。
 
 测试覆盖真实 Git 历史、合并父节点、特殊路径和重命名、分页、只读状态、任务仓库隔离、文件定位边界、图连接关系与 UI 缓存标识。界面已在独立测试宿主中验证深浅主题、窄面板及键盘导航。
 
