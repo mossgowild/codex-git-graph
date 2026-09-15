@@ -6,6 +6,7 @@
   "scripts": {
     "build": "node build.mjs",
     "test": "node --test test.mjs",
+    "test:installed": "node --test installed.test.mjs",
     "start": "node dist/server.mjs"
   },
   "dependencies": {

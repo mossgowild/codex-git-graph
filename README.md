@@ -36,7 +36,7 @@ codex plugin add git-graph@codex-git-graph
 codex plugin remove git-graph@codex-git-graph
 ```
 
-市场采用 [OpenAI 官方插件目录格式](https://developers.openai.com/plugins/build/plugins)，上述命令已对照 Codex 自带 CLI 的安装接口。
+市场采用 [OpenAI 官方插件目录格式](https://developers.openai.com/plugins/build/plugins)。已通过上述 GitHub 链接完成安装，并由 Codex app-server 验证插件身份、任务侧面板入口、目标仓库、非 Git 目录及默认任务目录。
 
 ## 操作与边界
 
@@ -61,5 +61,7 @@ npm test
 当前 Codex 兼容格式不会展开 MCP 参数中的 `${PLUGIN_ROOT}`。构建脚本按插件清单版本生成启动命令，从 `CODEX_HOME`（未设置时为 `~/.codex`）下的 `plugins/cache/codex-git-graph/git-graph/<version>/` 加载插件，保持进程工作目录为当前任务目录。这依赖 Codex 的缓存目录结构；以后宿主支持直接传入插件路径且保留任务目录时应替换。修改清单版本后需要重新构建；不要单独复制 `.mcp.json` 到别的市场。
 
 测试覆盖真实 Git 历史、合并父节点、特殊路径和重命名、分页、只读状态、任务仓库隔离、文件定位边界、图连接关系与 UI 缓存标识。界面已在独立测试宿主中验证深浅主题、窄面板及键盘导航。
+
+在本机已安装当前清单版本后，运行 `npm run test:installed` 可额外检查实际缓存中的启动程序，确认它保留任务仓库及非 Git 目录；该检查不会安装插件或修改 Codex 配置。
 
 依赖许可见 [THIRD-PARTY-LICENSES.txt](plugins/git-graph/THIRD-PARTY-LICENSES.txt)。
