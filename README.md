@@ -17,7 +17,7 @@
 需要支持插件市场和 MCP Apps 任务侧面板的 Codex Desktop、Node.js 20.11+ 和 Git。`node` 与 `git` 必须在 Codex 可用的 PATH 中。私有仓库需要本机 Git 具有相应的 GitHub 读取权限。
 
 ```sh
-codex plugin marketplace add https://github.com/mossgowild/codex-git-graph.git
+codex plugin marketplace add https://github.com/mossgowild/codex-git-graph-plugin.git
 codex plugin add git-graph@codex-git-graph
 ```
 
@@ -55,8 +55,8 @@ codex plugin remove git-graph@codex-git-graph
 ## 开发
 
 ```sh
-git clone https://github.com/mossgowild/codex-git-graph.git
-cd codex-git-graph/plugins/git-graph
+git clone https://github.com/mossgowild/codex-git-graph-plugin.git
+cd codex-git-graph-plugin/plugins/git-graph
 npm ci
 npm run build
 npm test
