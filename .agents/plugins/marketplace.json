@@ -1,0 +1,20 @@
+{
+  "name": "codex-git-graph",
+  "interface": {
+    "displayName": "Codex Git Graph"
+  },
+  "plugins": [
+    {
+      "name": "git-graph",
+      "source": {
+        "source": "local",
+        "path": "./plugins/git-graph"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

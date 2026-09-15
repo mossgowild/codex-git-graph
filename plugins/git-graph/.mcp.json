@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "git_graph": {
+      "command": "node",
+      "args": [
+        "${PLUGIN_ROOT}/dist/server.mjs"
+      ]
+    }
+  }
+}
