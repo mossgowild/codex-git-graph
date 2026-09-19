@@ -13,10 +13,16 @@
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
+    "monaco-editor": "0.56.0",
     "zod": "^4.2.0"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
     "esbuild": "0.28.2"
+  },
+  "overrides": {
+    "monaco-editor": {
+      "dompurify": "3.4.15"
+    }
   }
 }

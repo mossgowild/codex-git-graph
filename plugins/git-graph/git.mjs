@@ -6,18 +6,18 @@ import { isAbsolute, resolve, sep } from 'node:path';
 const exec = promisify(execFile);
 const objectId = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
-export async function git(repo, args) {
+export async function git(repo, args, encoding = 'utf8') {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
   try {
     const { stdout } = await exec('git', ['--no-pager', '--no-optional-locks', '--literal-pathspecs',
       '-c', 'core.fsmonitor=false', '-c', 'core.quotePath=false', '-C', repo, ...args], {
-      env: { ...env, LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1' }, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 20000,
+      env: { ...env, LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1' }, encoding, maxBuffer: 16 * 1024 * 1024, timeout: 20000,
     });
     return stdout;
   } catch (error) {
     if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') throw new Error('结果超过 16 MB，请选择单个文件或缩小历史范围。');
     if (error.killed) throw new Error('Git 查询超过 20 秒，请缩小范围后重试。');
-    throw new Error(error.stderr?.trim() || error.message, { cause: error });
+    throw new Error(String(error.stderr || '').trim() || error.message, { cause: error });
   }
 }
 
@@ -95,7 +95,7 @@ export function parseFiles(raw) {
   return files;
 }
 
-export async function commit({ repoPath, hash, parent = 0 }) {
+export async function commit({ repoPath, hash, parent = 0, compareHash = '' }) {
   const repo = await repository(repoPath);
   hash = await verifyCommit(repo, hash);
   const raw = await git(repo, ['show', '-s', '--no-show-signature',
@@ -103,23 +103,43 @@ export async function commit({ repoPath, hash, parent = 0 }) {
   const [id, parentText, author, email, date, message] = raw.split('\0');
   const parents = parentText ? parentText.split(' ') : [];
   if (!Number.isInteger(parent) || parent < 0 || parent >= Math.max(parents.length, 1)) throw new Error('父提交选择无效。');
-  const base = parents[parent];
+  if (compareHash && parent !== 0) throw new Error('不能同时选择比较提交和合并父节点。');
+  const base = compareHash ? await verifyCommit(repo, compareHash) : parents[parent] || null;
   const args = base ? ['diff', '--name-status', '-z', '-M', base, hash, '--']
     : ['diff-tree', '--root', '--no-commit-id', '-r', '--name-status', '-z', '-M', hash, '--'];
   const files = parseFiles(await git(repo, args));
-  return { repo, hash: id, parents, parent, author, email, date, message: message.trimEnd(), files };
+  return { repo, hash: id, parents, parent, base, compareHash, author, email, date, message: message.trimEnd(), files };
+}
+
+async function revisionFile(repo, hash, path, exists) {
+  const revision = { hash, path, exists, mode: null, content: '' };
+  if (!exists) return revision;
+  const entry = await git(repo, ['ls-tree', '-z', hash, '--', path]);
+  const tab = entry.indexOf('\t');
+  if (tab === -1 || entry.slice(tab + 1) !== `${path}\0`) throw new Error('历史文件对象不存在。');
+  const [mode, type, id] = entry.slice(0, tab).split(' ');
+  revision.mode = mode;
+  if (mode === '160000') return { ...revision, content: `Subproject commit ${id}\n` };
+  if (type !== 'blob') throw new Error('所选历史路径不是文件。');
+  const size = Number((await git(repo, ['cat-file', '-s', id])).trim());
+  // ponytail: bound each full document to 2 MiB; a streamed viewer is needed for larger files.
+  if (size > 2 * 1024 * 1024) return { ...revision, reason: '文件超过 2 MiB，未载入文本比较。' };
+  const bytes = await git(repo, ['cat-file', 'blob', id], null);
+  if (bytes.includes(0)) return { ...revision, reason: '二进制文件，无法显示文本差异。' };
+  try { revision.content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
+  catch { return { ...revision, reason: '文件不是有效的 UTF-8 文本，无法显示文本差异。' }; }
+  return revision;
 }
 
 export async function diff(args) {
   const detail = await commit(args);
   const file = detail.files.find(file => file.path === args.path);
   if (!file) throw new Error('这个文件不在所选提交的变更中。');
-  const base = detail.parents[detail.parent];
-  const paths = file.oldPath ? [file.oldPath, file.path] : [file.path];
-  const options = ['--no-ext-diff', '--no-textconv', '--no-color', '--find-renames'];
-  const command = base ? ['diff', ...options, base, detail.hash, '--', ...paths]
-    : ['diff-tree', '--root', '--no-commit-id', '-r', '-p', ...options, detail.hash, '--', ...paths];
-  return { hash: detail.hash, path: file.path, patch: await git(detail.repo, command) };
+  const [original, modified] = await Promise.all([
+    revisionFile(detail.repo, detail.base, file.oldPath || file.path, Boolean(detail.base) && file.status[0] !== 'A'),
+    revisionFile(detail.repo, detail.hash, file.path, file.status[0] !== 'D'),
+  ]);
+  return { hash: detail.hash, base: detail.base, ...file, original, modified };
 }
 
 export async function workspaceFile(args) {

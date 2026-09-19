@@ -2,10 +2,11 @@ import { App, applyDocumentTheme, applyHostStyleVariables } from '@modelcontextp
 import { z } from 'zod';
 import { layout, colors } from './graph.mjs';
 import { columns, maxColumnWidth, widthsSchema } from './column-layout.mjs';
+import { clearDiff, showDiff, themeDiff, disposeDiff } from './diff-editor.mjs';
 
 const $ = id => document.getElementById(id);
 const app = new App({ name: 'Git Graph', version: '0.2.1' });
-const state = { repo: '', branch: '', historyNotice: '', parent: 0, commits: [], refs: [], tips: [], selected: '', detail: null, file: '', matches: [], match: -1,
+const state = { repo: '', branch: '', historyNotice: '', parent: 0, compareHash: '', compareArmed: false, commits: [], refs: [], tips: [], selected: '', detail: null, file: '', matches: [], match: -1,
   hasMore: false, historyVersion: 0, detailVersion: 0, diffVersion: 0, connected: false, loading: false };
 let retry = null;
 let columnWidths = {}, graphWidth = 20, layoutReady = false, layoutRetry = null;
@@ -139,6 +140,7 @@ function theme(context) {
   if (context.theme) applyDocumentTheme(context.theme);
   if (context.styles?.variables) applyHostStyleVariables(context.styles.variables);
   if (context['openai/interactionCursor']) document.documentElement.style.setProperty('--interaction-cursor', context['openai/interactionCursor']);
+  themeDiff(document.documentElement.style.colorScheme || context.theme);
 }
 function refsLabel(ref) { return ref.name.replace(/^refs\/(heads|remotes|tags)\//, ''); }
 function refDisplayName(ref) {
@@ -155,7 +157,7 @@ function refBadge(ref) {
 function renderCommitRefs() {
   const refs = state.refs.filter(ref => ref.hash === state.selected);
   $('commit-refs').replaceChildren(...(refs.length
-    ? [node('span', '指向此提交：'), ...refs.map(refBadge)]
+    ? [node('span', state.compareHash ? '指向目标提交：' : '指向此提交：'), ...refs.map(refBadge)]
     : [node('span', '无分支或标签直接指向此提交')]));
 }
 
@@ -222,7 +224,7 @@ async function loadHistory(append = false, branch = $('branch').value) {
     if (result.missingBranch) append = false;
     acceptHistory(result, append, notice);
     if (!append) $('history-scroll').scrollTop = 0;
-    if (state.selected && !append && !$('detail').hidden) selectCommit(state.selected, state.parent, false, state.file);
+    if (state.selected && !append && !$('detail').hidden) selectCommit(state.selected, state.parent, false, state.file, state.compareHash);
   } catch (e) {
     if (version !== state.historyVersion) return;
     $('branch').value = state.branch;
@@ -267,7 +269,8 @@ function renderHistory() {
   for (const row of graph.rows) {
     const button = node('button', null, 'commit-row');
     button.role = 'option'; button.dataset.hash = row.hash;
-    button.setAttribute('aria-selected', row.hash === state.selected ? 'true' : 'false');
+    button.setAttribute('aria-selected', String(row.hash === state.selected || row.hash === state.compareHash));
+    button.classList.toggle('compare-base', row.hash === state.compareHash);
     button.setAttribute('aria-label', `${row.subject}，${row.author}，${row.hash.slice(0, 8)}`);
     button.tabIndex = row.hash === state.selected || (!state.selected && fragment.childNodes.length === 0) ? 0 : -1;
     button.append(graphSvg(row, width));
@@ -304,47 +307,55 @@ function stepMatch(direction) {
   if (!state.matches.length) return;
   const index = state.match < 0 ? (direction > 0 ? 0 : state.matches.length - 1)
     : (state.match + direction + state.matches.length) % state.matches.length;
-  selectCommit(state.matches[index], 0, true);
+  activateCommit(state.matches[index], false, true);
 }
 function closeDetail(resetSelection = true) {
   ++state.detailVersion; ++state.diffVersion;
   if (resetSelection) state.selected = '';
-  state.detail = null; state.file = '';
+  state.detail = null; state.file = ''; state.compareHash = ''; state.compareArmed = false;
+  clearDiff(); $('content').classList.remove('detail-expanded');
+  $('expand-detail').setAttribute('aria-pressed', 'false'); $('expand-detail').textContent = '展开';
   $('detail').hidden = true;
   for (const row of $('rows').children) {
     const selected = row.dataset.hash === state.selected;
+    row.classList.remove('compare-base');
     row.setAttribute('aria-selected', String(selected)); row.tabIndex = selected ? 0 : -1;
     if (selected) row.focus({ preventScroll: true });
   }
   if (!state.selected && $('rows').firstElementChild) $('rows').firstElementChild.tabIndex = 0;
   updateSearch();
 }
-async function selectCommit(hash, parent = 0, focus = false, file = '') {
+async function selectCommit(hash, parent = 0, focus = false, file = '', compareHash = '') {
   const version = ++state.detailVersion; ++state.diffVersion;
   $('error').hidden = true;
   state.selected = hash; state.parent = parent; state.detail = null; state.file = file;
+  state.compareHash = compareHash; state.compareArmed = false;
+  $('compare').textContent = compareHash ? '结束比较' : '比较…'; $('compare').setAttribute('aria-pressed', 'false');
+  $('compare-hint').hidden = true; $('swap-comparison').hidden = !compareHash;
   for (const row of $('rows').children) {
     const selected = row.dataset.hash === hash;
-    row.setAttribute('aria-selected', String(selected)); row.tabIndex = selected ? 0 : -1;
+    row.setAttribute('aria-selected', String(selected || row.dataset.hash === compareHash)); row.tabIndex = selected ? 0 : -1;
+    row.classList.toggle('compare-base', row.dataset.hash === compareHash);
     if (selected && focus) { row.scrollIntoView({ block: 'nearest' }); row.focus({ preventScroll: true }); }
   }
   updateSearch();
-  $('detail').hidden = false; $('detail-hash').textContent = hash.slice(0, 12);
+  $('detail').hidden = false; $('detail-hash').textContent = compareHash ? `${compareHash.slice(0, 7)} → ${hash.slice(0, 7)}` : hash.slice(0, 12);
+  $('detail-hash').title = compareHash ? `基准：${compareHash}\n目标：${hash}` : hash;
   renderCommitRefs();
   $('commit-message').textContent = '正在读取提交…'; $('commit-meta').textContent = '';
-  $('files').replaceChildren(); $('patch').replaceChildren(); $('parent-label').hidden = true;
+  $('files').replaceChildren(); clearDiff(); $('parent-label').hidden = true;
   $('open-file').disabled = true;
   $('diff-title').textContent = '选择文件查看差异'; $('files-label').textContent = '变更文件';
   try {
-    const detail = await call('git_graph_commit', { hash, parent });
+    const detail = await call('git_graph_commit', { hash, parent, ...(compareHash ? { compareHash } : {}) });
     if (version !== state.detailVersion) return;
     state.detail = detail;
     $('commit-message').textContent = detail.message || '（无提交说明）';
     $('commit-meta').replaceChildren(node('div', `${detail.author} <${detail.email}>`), node('div', new Date(detail.date).toLocaleString('zh-CN')));
-    $('parent-label').hidden = detail.parents.length < 2;
+    $('parent-label').hidden = Boolean(compareHash) || detail.parents.length < 2;
     $('parent').replaceChildren(...detail.parents.map((hash, i) => new Option(`${i + 1} · ${hash.slice(0, 12)}`, i)));
     $('parent').value = String(parent);
-    $('files-label').textContent = `变更文件 · ${detail.files.length}${detail.parents.length > 1 ? ` · 相对父提交 ${parent + 1}` : ''}`;
+    $('files-label').textContent = `变更文件 · ${detail.files.length}${compareHash ? ' · 基准 → 目标' : detail.parents.length > 1 ? ` · 相对父提交 ${parent + 1}` : ''}`;
     for (const file of detail.files) {
       const button = node('button'); button.dataset.path = file.path; button.setAttribute('aria-pressed', 'false');
       button.title = file.oldPath ? `${file.oldPath} → ${file.path}` : file.path;
@@ -355,10 +366,10 @@ async function selectCommit(hash, parent = 0, focus = false, file = '') {
       button.append(node('span', file.status[0], `file-status ${file.status[0]}`)); $('files').append(button);
     }
     if (detail.files.length) await selectFile(detail.files.some(item => item.path === file) ? file : detail.files[0].path);
-    else $('patch').append(node('span', '相对所选父提交没有文件变更。', 'notice'));
+    else clearDiff(compareHash ? '这两个提交之间没有文件变更。' : '相对所选父提交没有文件变更。');
   } catch (e) {
     if (version !== state.detailVersion) return;
-    $('commit-message').textContent = '提交读取失败'; error(e.message, () => selectCommit(hash, parent, false, file));
+    $('commit-message').textContent = '提交读取失败'; error(e.message, () => selectCommit(hash, parent, false, file, compareHash));
   }
 }
 async function selectFile(path) {
@@ -369,27 +380,26 @@ async function selectFile(path) {
   state.file = path;
   $('open-file').disabled = false;
   for (const button of $('files').children) button.setAttribute('aria-pressed', String(button.dataset.path === path));
-  $('diff-title').textContent = path;
-  $('diff-title').title = path;
-  $('patch').replaceChildren(node('span', '正在读取差异…', 'notice'));
+  const file = detail.files.find(file => file.path === path);
+  $('diff-title').textContent = file.oldPath ? `${file.oldPath} → ${path}` : path;
+  $('diff-title').title = $('diff-title').textContent;
+  clearDiff('正在读取差异…');
   try {
-    const result = await call('git_graph_diff', { hash: detail.hash, parent: detail.parent, path });
+    const result = await call('git_graph_diff', { ...detailArgs(detail), path });
     if (version !== state.diffVersion) return;
-    const fragment = document.createDocumentFragment();
-    let inHunk = false;
-    for (const text of result.patch.split('\n')) {
-      if (text.startsWith('diff ')) inHunk = false;
-      let type = '';
-      if (text.startsWith('@@')) { inHunk = true; type = 'hunk'; }
-      else if (inHunk) type = text.startsWith('+') ? 'add' : text.startsWith('-') ? 'remove' : '';
-      else if (/^(diff |index |---|\+\+\+|rename |similarity |new file|deleted file|Binary)/.test(text)) type = 'header';
-      fragment.append(node('span', text || ' ', `line ${type}`));
-    }
-    $('patch').replaceChildren(fragment); $('patch').scrollTop = 0; $('patch').scrollLeft = 0;
+    showDiff(result);
   } catch (e) {
     if (version !== state.diffVersion) return;
-    $('patch').replaceChildren(node('span', '差异读取失败。', 'notice')); error(e.message, () => selectFile(path));
+    clearDiff('差异读取失败。'); error(e.message, () => selectFile(path));
   }
+}
+
+function detailArgs(detail) {
+  return { hash: detail.hash, parent: detail.parent, ...(detail.compareHash ? { compareHash: detail.compareHash } : {}) };
+}
+function activateCommit(hash, compare = false, focus = false) {
+  const base = (compare || state.compareArmed) && !$('detail').hidden ? state.compareHash || state.selected : '';
+  selectCommit(hash, 0, focus, '', base && base !== hash ? base : '');
 }
 
 async function openWorkspaceFile() {
@@ -397,7 +407,7 @@ async function openWorkspaceFile() {
   if (!detail || !file) return;
   $('open-file').disabled = true;
   try {
-    const { path } = await call('git_graph_workspace_file', { hash: detail.hash, parent: detail.parent, path: file });
+    const { path } = await call('git_graph_workspace_file', { ...detailArgs(detail), path: file });
     if (version !== state.diffVersion) return;
     const result = await app.request({ method: 'openai/files/open', params: { path } }, z.object({ isError: z.boolean().optional() }).passthrough());
     if (result.isError) throw new Error('Codex 未能打开工作区文件。');
@@ -415,19 +425,45 @@ $('search').addEventListener('input', updateSearch);
 $('search').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); stepMatch(event.shiftKey ? -1 : 1); } });
 $('prev-match').addEventListener('click', () => stepMatch(-1));
 $('next-match').addEventListener('click', () => stepMatch(1));
-$('rows').addEventListener('click', event => { const row = event.target.closest('.commit-row'); if (row) selectCommit(row.dataset.hash); });
+$('rows').addEventListener('click', event => {
+  const row = event.target.closest('.commit-row');
+  if (row) activateCommit(row.dataset.hash, event.metaKey || event.ctrlKey);
+});
 $('rows').addEventListener('keydown', event => {
   const row = event.target.closest('.commit-row'); if (!row) return;
+  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); activateCommit(row.dataset.hash, true); return; }
   let target = null;
   if (event.key === 'ArrowDown') target = row.nextElementSibling;
   if (event.key === 'ArrowUp') target = row.previousElementSibling;
   if (event.key === 'Home') target = $('rows').firstElementChild;
   if (event.key === 'End') target = $('rows').lastElementChild;
-  if (target) { event.preventDefault(); selectCommit(target.dataset.hash, 0, true); }
+  if (target) {
+    event.preventDefault();
+    if (state.compareArmed || event.metaKey || event.ctrlKey) {
+      row.tabIndex = -1; target.tabIndex = 0; target.focus();
+    } else selectCommit(target.dataset.hash, 0, true);
+  }
 });
 $('files').addEventListener('click', event => { const button = event.target.closest('button'); if (button) selectFile(button.dataset.path); });
 $('parent').addEventListener('change', () => selectCommit(state.selected, Number($('parent').value)));
 $('close-detail').addEventListener('click', () => closeDetail(false));
+$('compare').addEventListener('click', () => {
+  if (state.compareHash) { selectCommit(state.selected); return; }
+  state.compareArmed = !state.compareArmed;
+  $('compare').setAttribute('aria-pressed', String(state.compareArmed));
+  $('compare').textContent = state.compareArmed ? '取消比较' : '比较…';
+  $('compare-hint').hidden = !state.compareArmed;
+  if (state.compareArmed) {
+    $('content').classList.remove('detail-expanded');
+    $('expand-detail').setAttribute('aria-pressed', 'false'); $('expand-detail').textContent = '展开';
+    $('rows').querySelector(`[data-hash="${state.selected}"]`)?.focus();
+  }
+});
+$('swap-comparison').addEventListener('click', () => selectCommit(state.compareHash, 0, false, '', state.selected));
+$('expand-detail').addEventListener('click', () => {
+  const expanded = $('content').classList.toggle('detail-expanded');
+  $('expand-detail').setAttribute('aria-pressed', String(expanded)); $('expand-detail').textContent = expanded ? '收起' : '展开';
+});
 $('open-file').addEventListener('click', openWorkspaceFile);
 $('files').addEventListener('keydown', event => {
   const button = event.target.closest('button');
@@ -442,6 +478,7 @@ $('copy-hash').addEventListener('click', async () => {
 $('dismiss-error').addEventListener('click', () => { $('error').hidden = true; });
 $('retry').addEventListener('click', () => { $('error').hidden = true; retry?.(); });
 document.addEventListener('keydown', event => {
+  if (event.target.closest('#diff-editor')) return;
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f' && state.repo) { event.preventDefault(); $('search').focus(); }
   if (event.key === 'Escape' && !$('detail').hidden && !document.activeElement.closest('input, select')) closeDetail(false);
 });
@@ -466,7 +503,7 @@ app.ontoolresult = result => {
 };
 app.onteardown = async () => {
   ++state.historyVersion; ++state.detailVersion; ++state.diffVersion;
-  columnsObserver.disconnect(); await saveQueue; return {};
+  columnsObserver.disconnect(); disposeDiff(); await saveQueue; return {};
 };
 app.connect().then(() => {
   state.connected = true; theme(app.getHostContext() || {});

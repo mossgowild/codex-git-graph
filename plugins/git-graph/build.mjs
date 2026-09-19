@@ -2,8 +2,13 @@ import { build } from 'esbuild';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 
 await mkdir('dist', { recursive: true });
-const ui = await build({ entryPoints: ['ui.mjs'], bundle: true, minify: true, format: 'iife', platform: 'browser', write: false });
-const html = (await readFile('window.html', 'utf8')).replace('/* APP_SCRIPT */', () => ui.outputFiles[0].text.replaceAll('</script', '<\\/script'));
+const worker = await build({ entryPoints: ['monaco-editor/editor/editor.worker.js'], bundle: true,
+  minify: true, format: 'iife', platform: 'browser', write: false, supported: { 'template-literal': false } });
+const ui = await build({ entryPoints: ['ui.mjs'], bundle: true, minify: true, format: 'iife', platform: 'browser', write: false,
+  outfile: 'dist/ui.js', supported: { 'template-literal': false }, loader: { '.ttf': 'dataurl' }, define: { __DIFF_WORKER__: JSON.stringify(worker.outputFiles[0].text) } });
+const html = (await readFile('window.html', 'utf8'))
+  .replace('/* EDITOR_STYLE */', () => ui.outputFiles.find(file => file.path.endsWith('.css')).text.replaceAll('</style', '<\\/style'))
+  .replace('/* APP_SCRIPT */', () => ui.outputFiles.find(file => file.path.endsWith('.js')).text.replaceAll('</script', '<\\/script'));
 await writeFile('dist/window.html', html);
 await build({ entryPoints: ['server.mjs'], bundle: true, platform: 'node', format: 'esm', target: 'node20', outfile: 'dist/server.mjs', loader: { '.svg': 'dataurl' },
   banner: { js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);" } });

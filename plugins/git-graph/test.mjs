@@ -78,8 +78,14 @@ test('real Git history, merge parents, renames, paths, pagination, read-only sta
     assert.deepEqual((await commit({ repoPath: repo, hash: merge, parent: 1 })).files.map(file => file.path), ['alpha.txt']);
     const renamed = await commit({ repoPath: repo, hash: latest });
     assert.deepEqual(renamed.files, [{ status: 'R100', oldPath: 'alpha.txt', path: strange }]);
-    assert.match((await diff({ repoPath: repo, hash: latest, path: strange })).patch, /rename from/);
-    assert.match((await diff({ repoPath: repo, hash: root, path: 'alpha.txt' })).patch, /\+one/);
+    const renameDiff = await diff({ repoPath: repo, hash: latest, path: strange });
+    assert.equal(renameDiff.original.path, 'alpha.txt');
+    assert.equal(renameDiff.modified.path, strange);
+    assert.equal(renameDiff.original.content, renameDiff.modified.content);
+    const rootDiff = await diff({ repoPath: repo, hash: root, path: 'alpha.txt' });
+    assert.equal(rootDiff.original.exists, false);
+    assert.equal(rootDiff.original.content, '');
+    assert.equal(rootDiff.modified.content, 'one\ntwo\nthree\n');
     assert.equal((await workspaceFile({ repoPath: repo, hash: latest, path: strange })).path, await realpath(join(repo, strange)));
     await assert.rejects(workspaceFile({ repoPath: repo, hash: root, path: 'alpha.txt' }), /已没有/);
     await assert.rejects(workspaceFile({ repoPath: repo, hash: latest, path: '../outside' }), /不在/);
@@ -111,7 +117,7 @@ test('real Git history, merge parents, renames, paths, pagination, read-only sta
     assert.equal(current.structuredContent.commits[0].hash, latest);
     assert.equal((await client.callTool({ name: 'git_graph_history', arguments: {} })).structuredContent.head, latest);
     assert.equal((await client.callTool({ name: 'git_graph_commit', arguments: { hash: merge } })).structuredContent.parents.length, 2);
-    assert.match((await client.callTool({ name: 'git_graph_diff', arguments: { hash: root, path: 'alpha.txt' } })).structuredContent.patch, /\+one/);
+    assert.equal((await client.callTool({ name: 'git_graph_diff', arguments: { hash: root, path: 'alpha.txt' } })).structuredContent.modified.content, 'one\ntwo\nthree\n');
     assert.equal((await client.callTool({ name: 'git_graph_workspace_file', arguments: { hash: latest, path: strange } })).structuredContent.path, await realpath(join(repo, strange)));
     for (const name of ['git_graph', 'git_graph_history', 'git_graph_commit', 'git_graph_diff', 'git_graph_workspace_file']) {
       const changed = await client.callTool({ name, arguments: { repoPath: noGit, ...(['git_graph_commit', 'git_graph_diff', 'git_graph_workspace_file'].includes(name) ? { hash: root } : {}), ...(['git_graph_diff', 'git_graph_workspace_file'].includes(name) ? { path: 'alpha.txt' } : {}) } });
@@ -157,6 +163,75 @@ test('graph edges preserve ancestry across multi-parent DAGs and partial histori
       [...new Set(Array.from({ length: 1 + Math.floor(random() * 3) }, () => String(i + 1 + Math.floor(random() * (79 - i)))))] }));
     checkGraph(commits); checkGraph(commits.slice(0, 25));
   }
+});
+
+test('revision comparison reads exact blobs and represents missing, binary, large and special files', async () => {
+  const repo = await mkdtemp(join(tmpdir(), 'git-graph-revisions-'));
+  try {
+    await git(repo, ['init', '-b', 'main']);
+    for (const [key, value] of [['user.name', 'Graph Test'], ['user.email', 'graph@example.invalid'],
+      ['commit.gpgsign', 'false'], ['core.hooksPath', '/dev/null'], ['core.autocrlf', 'false']]) await git(repo, ['config', key, value]);
+    const save = async message => {
+      await git(repo, ['add', '-A']); await git(repo, ['commit', '-m', message]);
+      return (await git(repo, ['rev-parse', 'HEAD'])).trim();
+    };
+    const path = ':(glob)*中文\tfile.txt';
+    await writeFile(join(repo, path), 'original\n');
+    await writeFile(join(repo, 'deleted.txt'), 'delete me\n');
+    await writeFile(join(repo, 'eol.txt'), '\uFEFFone\r\ntwo');
+    const base = await save('Original files');
+    await writeFile(join(repo, path), 'modified\n');
+    await rm(join(repo, 'deleted.txt'));
+    await writeFile(join(repo, 'empty.txt'), '');
+    await writeFile(join(repo, 'binary.bin'), Buffer.from([0, 1, 2]));
+    await writeFile(join(repo, 'invalid.txt'), Buffer.from([0xff, 0xfe]));
+    await writeFile(join(repo, 'large.txt'), 'x'.repeat(2 * 1024 * 1024 + 1));
+    await writeFile(join(repo, 'eol.txt'), 'one\ntwo');
+    await symlink('/outside/repository', join(repo, 'link'));
+    const target = await save('Changed files');
+    const detail = await commit({ repoPath: repo, hash: target, compareHash: base });
+    assert.equal(detail.base, base);
+    assert.equal(detail.compareHash, base);
+    assert.deepEqual((await commit({ repoPath: repo, hash: base, compareHash: base })).files, []);
+    const read = path => diff({ repoPath: repo, hash: target, compareHash: base, path });
+    const changed = await read(path);
+    assert.equal(changed.original.content, 'original\n');
+    assert.equal(changed.modified.content, 'modified\n');
+    const removed = await read('deleted.txt');
+    assert.equal(removed.original.content, 'delete me\n');
+    assert.equal(removed.modified.exists, false);
+    const added = await read('empty.txt');
+    assert.equal(added.original.exists, false);
+    assert.equal(added.modified.exists, true);
+    assert.equal(added.modified.content, '');
+    const reversed = await diff({ repoPath: repo, hash: base, compareHash: target, path: 'deleted.txt' });
+    assert.equal(reversed.original.exists, false);
+    assert.equal(reversed.modified.content, 'delete me\n');
+    assert.match((await read('binary.bin')).modified.reason, /二进制/);
+    assert.match((await read('invalid.txt')).modified.reason, /UTF-8/);
+    assert.match((await read('large.txt')).modified.reason, /2 MiB/);
+    const eol = await read('eol.txt');
+    assert.equal(eol.original.content, '\uFEFFone\r\ntwo');
+    assert.equal(eol.modified.content, 'one\ntwo');
+    const link = await read('link');
+    assert.equal(link.modified.mode, '120000');
+    assert.equal(link.modified.content, '/outside/repository');
+    await assert.rejects(commit({ repoPath: repo, hash: target, compareHash: '--help' }), /无效/);
+    await assert.rejects(read('../outside'), /不在/);
+    await assert.rejects(read('eol.txt\0'), /不在/);
+    // Mode-only and submodule changes must remain visible even without a text hunk.
+    await git(repo, ['update-index', '--chmod=+x', '--', path]);
+    await git(repo, ['update-index', '--add', '--cacheinfo', `160000,${base},vendor`]);
+    await git(repo, ['commit', '-m', 'Modes and submodule']);
+    const modeCommit = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+    const mode = await diff({ repoPath: repo, hash: modeCommit, path });
+    assert.equal(mode.original.content, mode.modified.content);
+    assert.equal(mode.original.mode, '100644');
+    assert.equal(mode.modified.mode, '100755');
+    const submodule = await diff({ repoPath: repo, hash: modeCommit, path: 'vendor' });
+    assert.equal(submodule.modified.content, `Subproject commit ${base}\n`);
+    assert.equal(submodule.modified.mode, '160000');
+  } finally { await rm(repo, { recursive: true, force: true }); }
 });
 
 test('changed UI content gets a new host cache identity', async () => {

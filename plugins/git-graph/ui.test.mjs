@@ -34,7 +34,7 @@ async function callTool(request) {
 }
 const script = `import {AppBridge,PostMessageTransport} from '@modelcontextprotocol/ext-apps/app-bridge';
 const frame=document.querySelector('iframe');
-const variables={'--color-background-primary':'#0d1117','--color-background-secondary':'#292d33','--color-text-primary':'#e6edf3','--color-text-secondary':'#7d838b','--color-border-secondary':'#23282f','--color-ring-primary':'#76a7f3','--font-sans':'system-ui','--font-text-sm-size':'13px','--font-text-xs-size':'12px'};
+const variables={'--color-background-primary':'#0d1117','--color-background-secondary':'#292d33','--color-text-primary':'#e6edf3','--color-text-secondary':'#7d838b','--color-border-secondary':'#23282f','--color-ring-primary':'#76a7f3','--color-text-success':'#3fb950','--color-text-danger':'#f85149','--font-sans':'system-ui','--font-text-sm-size':'13px','--font-text-xs-size':'12px'};
 const bridge=new AppBridge(null,{name:'UI test host',version:'1.0.0'},{serverTools:{}},{hostContext:{theme:'dark',styles:{variables},displayMode:'fullscreen',containerDimensions:{maxHeight:2000}}});
 async function call(params){return(await fetch('/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(params)})).json();}
 bridge.oncalltool=call;
@@ -51,7 +51,7 @@ const server = createServer(async (req,res)=>{
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify(result));return;
     }
     if(req.url==='/host.js'){res.setHeader('Content-Type','text/javascript');res.end(built.outputFiles[0].text);return;}
-    if(req.url==='/frame.html'){res.setHeader('Content-Type','text/html');res.end(await readFile(`${root}/dist/window.html`));return;}
+    if(req.url==='/frame.html'){res.setHeader('Content-Type','text/html');res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; font-src data:; img-src data: blob:; worker-src blob:; connect-src blob: data:");res.end(await readFile(`${root}/dist/window.html`));return;}
     res.setHeader('Content-Type','text/html');res.end('<!doctype html><html><style>html,body{margin:0;height:100%}iframe{display:block;width:100%;height:100%;border:0}</style><iframe sandbox="allow-scripts"></iframe><script type="module" src="/host.js"></script></html>');
   }catch(e){res.writeHead(500).end(e.message);}
 });
@@ -61,7 +61,13 @@ try {
   browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM});
   const context=await browser.newContext({viewport:{width:1000,height:760}});
   let page=await context.newPage();
-  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  const errors=[], workers=[];
+  const observe = page => {
+    page.on('pageerror',e=>errors.push(e.message));
+    page.on('console',message=>{if (message.type()==='error' || /Could not create web worker/.test(message.text())) errors.push(message.text());});
+    page.on('worker',worker=>workers.push(worker.url()));
+  };
+  observe(page);
   const url=`http://127.0.0.1:${server.address().port}`;
   const open=async()=>{
     await page.goto(url);
@@ -116,7 +122,7 @@ try {
   const saved=async()=>JSON.parse(await readFile(join(data,'column-widths.json'),'utf8'));
   for(let i=0;i<50&&(await saved()).message!==changed[1];i++)await new Promise(r=>setTimeout(r,20));
   assert.equal((await saved()).message,changed[1]);
-  await page.close();page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));frame=await open();
+  await page.close();page=await context.newPage();observe(page);frame=await open();
   assert.deepEqual(await widths(),changed);await aligned();
   await frame.locator('[data-column="author"]').press('ArrowRight');assert.equal((await widths())[2],108);
   const author=await frame.locator('[data-column="author"]').boundingBox();
@@ -248,7 +254,7 @@ try {
     await frame.locator('#branch').selectOption('refs/heads/root-only');await settled();
     await frame.locator(`[data-hash="${base}"]`).click();await frame.locator('#files button[data-path="extra.txt"]').click();
     await frame.locator('#refresh').click();await settled();
-    await frame.locator('#patch .add').getByText('+extra',{exact:true}).waitFor();
+    await frame.locator('#diff-status').getByText('1 处差异',{exact:true}).waitFor();
     assert.equal(await frame.locator('#files button[aria-pressed="true"]').getAttribute('data-path'),'extra.txt');
     await frame.locator('#close-detail').click();await frame.locator('#refresh').click();await settled();
     assert.equal(await frame.locator('#detail').isVisible(),false);
@@ -276,12 +282,110 @@ try {
       assert.equal(await frame.locator(`#commit-refs .ref[title="${name}"]`).innerText(),labels[index]);
     }
 
-    // Hunk content resembling file headers still receives addition/deletion colors.
+    // Full revision models preserve text that used to be mistaken for patch headers.
     await reopen();await loadAllMain();await frame.locator(`[data-hash="${main}"]`).click();
-    await frame.locator('#patch .line').getByText('+++new',{exact:true}).waitFor();
-    for (const text of ['+++new','+++ new header lookalike']) assert.equal(await frame.locator('#patch .add').getByText(text,{exact:true}).count(),1);
-    for (const text of ['---old','--- old header lookalike']) assert.equal(await frame.locator('#patch .remove').getByText(text,{exact:true}).count(),1);
-    assert.equal(await frame.locator('#patch .header').getByText('+++ b/base.txt',{exact:true}).count(),1);
+    await frame.locator('#diff-status').getByText('1 处差异',{exact:true}).waitFor();
+    assert.match((await frame.locator('#diff-editor .view-lines').allTextContents()).join(' ').replaceAll('\u00a0',' '),/\+\+new/);
+    assert.ok(await frame.locator('#diff-editor .char-insert').count()>0);
+    assert.ok(await frame.locator('#diff-editor .char-delete').count()>0);
+    assert.equal(await frame.locator('#diff-editor .monaco-editor').first().evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(13, 17, 23)');
+    await frame.locator('#diff-mode').selectOption('split');
+    assert.equal(await frame.locator('#diff-editor .editor.original').evaluate(el=>el.getBoundingClientRect().width>0),true);
+    await frame.locator('#expand-detail').click();
+    assert.equal(await frame.locator('#history-pane').isVisible(),false);
+    if (process.env.UI_TEST_ARTIFACTS) {
+      await mkdir(process.env.UI_TEST_ARTIFACTS,{recursive:true});
+      await page.screenshot({path:join(process.env.UI_TEST_ARTIFACTS,'diff-dark.png')});
+    }
+    await page.evaluate(()=>window.light());
+    await page.waitForTimeout(50);
+    assert.equal(await frame.locator('#diff-editor .monaco-editor').first().evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(255, 255, 255)');
+    if (process.env.UI_TEST_ARTIFACTS) await page.screenshot({path:join(process.env.UI_TEST_ARTIFACTS,'diff-light.png')});
+    await frame.locator('#expand-detail').click();
+
+    // Compare two commits, swap the direction, and preserve the range on refresh.
+    await frame.locator(`[data-hash="${base}"]`).click();
+    await frame.locator(`[data-hash="${merge}"]`).click({modifiers:[process.platform==='darwin'?'Meta':'Control']});
+    await frame.locator('#detail-hash').getByText(`${base.slice(0,7)} → ${merge.slice(0,7)}`,{exact:true}).waitFor();
+    await frame.locator('#diff-status').getByText('处差异',{exact:false}).waitFor();
+    assert.deepEqual(await frame.locator('#files button').evaluateAll(items=>items.map(el=>el.dataset.path)),['base.txt','side.txt']);
+    assert.equal(await frame.locator('#rows [aria-selected="true"]').count(),2);
+    await frame.locator('#files button[data-path="side.txt"]').click();
+    await frame.locator('#diff-original').getByText('文件不存在',{exact:false}).waitFor();
+    await frame.locator('#refresh').click();await settled();
+    await frame.locator('#diff-status').getByText('处差异',{exact:false}).waitFor();
+    assert.equal(await frame.locator('#files button[aria-pressed="true"]').getAttribute('data-path'),'side.txt');
+    assert.equal(await frame.locator('#detail-hash').textContent(),`${base.slice(0,7)} → ${merge.slice(0,7)}`);
+    await frame.locator('#swap-comparison').click();
+    await frame.locator('#diff-status').getByText('处差异',{exact:false}).waitFor();
+    assert.equal(await frame.locator('#detail-hash').textContent(),`${merge.slice(0,7)} → ${base.slice(0,7)}`);
+    await frame.locator('#files button[data-path="side.txt"]').click();
+    await frame.locator('#diff-modified').getByText('文件不存在',{exact:false}).waitFor();
+    await frame.locator('#compare').click();
+    await frame.locator('#detail-hash').getByText(base.slice(0,12),{exact:true}).waitFor();
+    await frame.locator('#load-more').click();await frame.locator(`[data-hash="${main}"]`).waitFor();
+    await frame.locator('#compare').click();
+    assert.equal(await frame.locator('#compare-hint').isVisible(),true);
+    await frame.locator(`[data-hash="${main}"]`).click();
+    await frame.locator('#detail-hash').getByText(`${base.slice(0,7)} → ${main.slice(0,7)}`,{exact:true}).waitFor();
+
+    // A late response from a previously selected file must not replace the current diff.
+    await frame.locator('#compare').click();await frame.locator(`[data-hash="${base}"]`).click();
+    await frame.locator('#diff-status').getByText('处差异',{exact:false}).waitFor();
+    let releaseDiff, enteredDiff;
+    const heldDiff=new Promise(resolve=>releaseDiff=resolve), startedDiff=new Promise(resolve=>enteredDiff=resolve);
+    intercept=async request=>{
+      if(request.name==='git_graph_diff'&&request.arguments.path==='extra.txt') {
+        const result=await historyClient.callTool(request);enteredDiff();await heldDiff;return result;
+      }
+    };
+    await frame.locator('#files button[data-path="extra.txt"]').click();await startedDiff;
+    await frame.locator('#files button[data-path="base.txt"]').click();
+    await frame.locator('#diff-status').getByText('处差异',{exact:false}).waitFor();
+    const lateDiff=page.waitForResponse(response=>response.url().endsWith('/call')&&response.request().postDataJSON().name==='git_graph_diff'&&response.request().postDataJSON().arguments.path==='extra.txt');
+    releaseDiff();await (await lateDiff).finished();await page.waitForTimeout(50);
+    assert.equal(await frame.locator('#diff-title').innerText(),'base.txt');
+    assert.doesNotMatch((await frame.locator('#diff-editor .view-lines').allTextContents()).join(' '),/extra/);
+    intercept=async request=>request.name==='git_graph_diff'&&request.arguments.path==='extra.txt'
+      ?{isError:true,content:[{type:'text',text:'模拟差异读取失败'}]}:null;
+    await frame.locator('#files button[data-path="extra.txt"]').click();await frame.locator('#error').waitFor({state:'visible'});
+    assert.equal(await frame.locator('#diff-editor').isVisible(),false);
+    intercept=null;await frame.locator('#retry').click();await frame.locator('#diff-status').getByText('处差异',{exact:false}).waitFor();
+
+    // A larger text file exercises folding, navigation, editor search and narrow layout.
+    const lines=Array.from({length:100},(_,i)=>`const value${i} = ${i};`);
+    await save('sample.ts',lines.join('\n')+'\n','Text base');
+    lines[12]='const value12 = 1200;';lines[85]='const value85 = 8500;';
+    const textTarget=await save('sample.ts',lines.join('\n')+'\n','Text changes');
+    await reopen();await frame.locator(`[data-hash="${textTarget}"]`).click();
+    await frame.locator('#diff-status').getByText('2 处差异',{exact:true}).waitFor();
+    await frame.locator('#expand-detail').click();
+    const linesBefore=(await frame.locator('#diff-editor .view-lines').allTextContents()).join(' ');
+    assert.match(linesBefore,/value12/);assert.doesNotMatch(linesBefore,/value50/);
+    await frame.locator('#next-change').click();await page.waitForTimeout(50);
+    await frame.locator('#prev-change').click();
+    const input=frame.locator('#diff-editor .editor.modified').getByRole('textbox',{name:'目标版本，只读'});
+    await input.press('x');
+    assert.equal((await frame.locator('#diff-editor .view-lines').allTextContents()).join(' '),linesBefore,'historical models remain read-only');
+    await input.press(process.platform==='darwin'?'Meta+f':'Control+f');
+    await frame.locator('#diff-editor .find-widget.visible').waitFor();
+    await input.press('Escape');
+    assert.equal(await frame.locator('#detail').isVisible(),true,'editor Escape does not close the commit');
+    await page.setViewportSize({width:400,height:700});await frame.locator('#expand-detail').click();
+    await page.waitForTimeout(50);
+    if(process.env.UI_TEST_ARTIFACTS) await page.screenshot({path:join(process.env.UI_TEST_ARTIFACTS,'diff-narrow.png')});
+    assert.equal(await frame.locator('#app').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+    assert.equal(await frame.locator('#diff-status').evaluate(el=>el.getBoundingClientRect().bottom<=innerHeight),true,'diff footer remains reachable in a narrow panel');
+    await page.setViewportSize({width:1000,height:850});
+
+    await save('eol.txt','\uFEFFone\r\ntwo','Original line endings');
+    await writeFile(join(repo,'binary.bin'),Buffer.from([0,1,2]));await git(repo,['add','binary.bin']);
+    const special=await save('eol.txt','one\ntwo','Encoding and binary changes');
+    await reopen();await frame.locator(`[data-hash="${special}"]`).click();
+    await frame.locator('#diff-notice').getByText('二进制文件',{exact:false}).waitFor();
+    assert.equal(await frame.locator('#diff-editor').isVisible(),false);
+    await frame.locator('#files button[data-path="eol.txt"]').click();
+    await frame.locator('#diff-status').getByText('文本相同；换行符或 BOM 有变化',{exact:true}).waitFor();
 
     // Changing refs between pages reloads a coherent history, including HEAD.
     await reopen();await selectMain();
@@ -315,8 +419,9 @@ try {
     assert.equal(await frame.locator('#history-table').isVisible(),true);
     assert.equal(await frame.locator('#searchbar').evaluate(element=>element.inert),false);
   }
+  assert.ok(workers.length>0&&workers.every(url=>url.startsWith('blob:')),'diff computation uses bundled blob workers');
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({passed:true,checks:['author-first drag','date-first drag','hash-first drag','graph-first drag','drag','keyboard','alignment','refresh','new-page persistence','cancel','narrow scroll','save retry','double-click reset','Home reset','light theme','long branch names','checkout vs selected refs','keyboard refs','ref refresh','no direct refs','detached HEAD','failed filter recovery','parent and file refresh','deleted filter recovery','reference namespaces','patch hunk colors','pagination context refresh','stale history responses'],original,changed}));
+  console.log(JSON.stringify({passed:true,checks:['column resizing and persistence','reference identities','history filtering and pagination','parent and file refresh','Monaco inline/split diff','host theme sync','comparison and swap','comparison refresh','stale diff responses','diff retry','read-only models','unchanged region folding','change navigation','editor search and focus','narrow diff layout','bundled CSP worker','stale history responses'],original,changed}));
 }finally{
   await browser?.close();server.closeAllConnections();server.close();await client.close();await historyClient?.close();await rm(temporary,{recursive:true,force:true});
 }

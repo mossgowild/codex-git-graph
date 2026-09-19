@@ -33696,7 +33696,7 @@ import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, resolve, sep } from "node:path";
 var exec = promisify(execFile);
 var objectId = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
-async function git(repo, args) {
+async function git(repo, args, encoding = "utf8") {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
   try {
     const { stdout } = await exec("git", [
@@ -33712,7 +33712,7 @@ async function git(repo, args) {
       ...args
     ], {
       env: { ...env, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1" },
-      encoding: "utf8",
+      encoding,
       maxBuffer: 16 * 1024 * 1024,
       timeout: 2e4
     });
@@ -33720,7 +33720,7 @@ async function git(repo, args) {
   } catch (error62) {
     if (error62.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") throw new Error("\u7ED3\u679C\u8D85\u8FC7 16 MB\uFF0C\u8BF7\u9009\u62E9\u5355\u4E2A\u6587\u4EF6\u6216\u7F29\u5C0F\u5386\u53F2\u8303\u56F4\u3002");
     if (error62.killed) throw new Error("Git \u67E5\u8BE2\u8D85\u8FC7 20 \u79D2\uFF0C\u8BF7\u7F29\u5C0F\u8303\u56F4\u540E\u91CD\u8BD5\u3002");
-    throw new Error(error62.stderr?.trim() || error62.message, { cause: error62 });
+    throw new Error(String(error62.stderr || "").trim() || error62.message, { cause: error62 });
   }
 }
 async function repository(repoPath) {
@@ -33810,7 +33810,7 @@ function parseFiles(raw) {
   }
   return files;
 }
-async function commit({ repoPath, hash: hash3, parent = 0 }) {
+async function commit({ repoPath, hash: hash3, parent = 0, compareHash = "" }) {
   const repo = await repository(repoPath);
   hash3 = await verifyCommit(repo, hash3);
   const raw = await git(repo, [
@@ -33824,20 +33824,43 @@ async function commit({ repoPath, hash: hash3, parent = 0 }) {
   const [id, parentText, author, email3, date5, message] = raw.split("\0");
   const parents = parentText ? parentText.split(" ") : [];
   if (!Number.isInteger(parent) || parent < 0 || parent >= Math.max(parents.length, 1)) throw new Error("\u7236\u63D0\u4EA4\u9009\u62E9\u65E0\u6548\u3002");
-  const base = parents[parent];
+  if (compareHash && parent !== 0) throw new Error("\u4E0D\u80FD\u540C\u65F6\u9009\u62E9\u6BD4\u8F83\u63D0\u4EA4\u548C\u5408\u5E76\u7236\u8282\u70B9\u3002");
+  const base = compareHash ? await verifyCommit(repo, compareHash) : parents[parent] || null;
   const args = base ? ["diff", "--name-status", "-z", "-M", base, hash3, "--"] : ["diff-tree", "--root", "--no-commit-id", "-r", "--name-status", "-z", "-M", hash3, "--"];
   const files = parseFiles(await git(repo, args));
-  return { repo, hash: id, parents, parent, author, email: email3, date: date5, message: message.trimEnd(), files };
+  return { repo, hash: id, parents, parent, base, compareHash, author, email: email3, date: date5, message: message.trimEnd(), files };
+}
+async function revisionFile(repo, hash3, path, exists) {
+  const revision = { hash: hash3, path, exists, mode: null, content: "" };
+  if (!exists) return revision;
+  const entry = await git(repo, ["ls-tree", "-z", hash3, "--", path]);
+  const tab = entry.indexOf("	");
+  if (tab === -1 || entry.slice(tab + 1) !== `${path}\0`) throw new Error("\u5386\u53F2\u6587\u4EF6\u5BF9\u8C61\u4E0D\u5B58\u5728\u3002");
+  const [mode, type, id] = entry.slice(0, tab).split(" ");
+  revision.mode = mode;
+  if (mode === "160000") return { ...revision, content: `Subproject commit ${id}
+` };
+  if (type !== "blob") throw new Error("\u6240\u9009\u5386\u53F2\u8DEF\u5F84\u4E0D\u662F\u6587\u4EF6\u3002");
+  const size = Number((await git(repo, ["cat-file", "-s", id])).trim());
+  if (size > 2 * 1024 * 1024) return { ...revision, reason: "\u6587\u4EF6\u8D85\u8FC7 2 MiB\uFF0C\u672A\u8F7D\u5165\u6587\u672C\u6BD4\u8F83\u3002" };
+  const bytes = await git(repo, ["cat-file", "blob", id], null);
+  if (bytes.includes(0)) return { ...revision, reason: "\u4E8C\u8FDB\u5236\u6587\u4EF6\uFF0C\u65E0\u6CD5\u663E\u793A\u6587\u672C\u5DEE\u5F02\u3002" };
+  try {
+    revision.content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return { ...revision, reason: "\u6587\u4EF6\u4E0D\u662F\u6709\u6548\u7684 UTF-8 \u6587\u672C\uFF0C\u65E0\u6CD5\u663E\u793A\u6587\u672C\u5DEE\u5F02\u3002" };
+  }
+  return revision;
 }
 async function diff(args) {
   const detail = await commit(args);
   const file2 = detail.files.find((file3) => file3.path === args.path);
   if (!file2) throw new Error("\u8FD9\u4E2A\u6587\u4EF6\u4E0D\u5728\u6240\u9009\u63D0\u4EA4\u7684\u53D8\u66F4\u4E2D\u3002");
-  const base = detail.parents[detail.parent];
-  const paths = file2.oldPath ? [file2.oldPath, file2.path] : [file2.path];
-  const options = ["--no-ext-diff", "--no-textconv", "--no-color", "--find-renames"];
-  const command = base ? ["diff", ...options, base, detail.hash, "--", ...paths] : ["diff-tree", "--root", "--no-commit-id", "-r", "-p", ...options, detail.hash, "--", ...paths];
-  return { hash: detail.hash, path: file2.path, patch: await git(detail.repo, command) };
+  const [original, modified] = await Promise.all([
+    revisionFile(detail.repo, detail.base, file2.oldPath || file2.path, Boolean(detail.base) && file2.status[0] !== "A"),
+    revisionFile(detail.repo, detail.hash, file2.path, file2.status[0] !== "D")
+  ]);
+  return { hash: detail.hash, base: detail.base, ...file2, original, modified };
 }
 async function workspaceFile(args) {
   const detail = await commit(args);
@@ -33925,15 +33948,17 @@ var definitions = {
     tips: external_exports.array(hash2).max(1e4).optional(),
     limit: external_exports.number().int().min(1).max(500).optional()
   }), run: history },
-  git_graph_commit: { title: "\u67E5\u770B\u63D0\u4EA4", schema: external_exports.strictObject({ hash: hash2, parent: external_exports.number().int().min(0).optional() }), run: commit },
+  git_graph_commit: { title: "\u67E5\u770B\u63D0\u4EA4", schema: external_exports.strictObject({ hash: hash2, compareHash: hash2.optional(), parent: external_exports.number().int().min(0).optional() }), run: commit },
   git_graph_diff: { title: "\u67E5\u770B\u6587\u4EF6\u5DEE\u5F02", schema: external_exports.strictObject({
     hash: hash2,
     parent: external_exports.number().int().min(0).optional(),
+    compareHash: hash2.optional(),
     path: external_exports.string().min(1).max(4096)
   }), run: diff },
   git_graph_workspace_file: { title: "\u5B9A\u4F4D\u5DE5\u4F5C\u533A\u6587\u4EF6", schema: external_exports.strictObject({
     hash: hash2,
     parent: external_exports.number().int().min(0).optional(),
+    compareHash: hash2.optional(),
     path: external_exports.string().min(1).max(4096)
   }), run: workspaceFile },
   git_graph_layout: { title: "\u8BFB\u53D6\u5217\u5BBD\u5E03\u5C40", schema: external_exports.strictObject({}), run: readLayout },

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Git Graph</title>
+<style>/* EDITOR_STYLE */</style>
 <style>
 /* Codex supplies these values; keep the panel surface and neutral controls in the host palette. */
 :root {
@@ -90,6 +91,7 @@ button svg { width: 16px; height: 16px; flex: none }
 .commit-row { height: 28px; width: 100%; border-radius: 0; text-align: left; background: transparent; white-space: nowrap }
 .commit-row:hover { background: var(--hover) }
 .commit-row[aria-selected=true] { background: var(--selected) }
+.commit-row.compare-base { box-shadow: inset 2px 0 var(--accent) }
 .commit-row.is-match .subject { color: var(--accent) }
 .commit-row svg { display: block; align-self: stretch; width: auto; height: 28px; overflow: visible }
 .commit-row .message { display: flex; align-items: center; min-width: 0; gap: 6px; overflow: hidden }
@@ -105,9 +107,14 @@ button svg { width: 16px; height: 16px; flex: none }
 .history-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 3px 12px; border-top: 1px solid var(--border); min-height: 28px; color: var(--muted); font-size: var(--font-text-xs-size, 12px) }
 #history-status { min-width: 0; overflow-wrap: anywhere }
 .readonly { margin-left: auto; white-space: nowrap }
-#detail { width: 43%; min-width: 320px; max-width: 780px; border-left: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0 }
+#detail { width: 43%; min-width: 320px; max-width: 780px; border-left: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; overflow: auto }
 #detail-header { display: flex; align-items: center; gap: 4px; padding: 6px 10px; border-bottom: 1px solid var(--border) }
+#detail-header { flex-wrap: wrap }
+#detail-header button { font-size: var(--font-text-xs-size, 12px); color: var(--muted) }
 #detail-hash { font-size: var(--font-text-xs-size, 12px); color: var(--muted) }
+#compare-hint { padding: 6px 12px; margin: 0; color: var(--muted); font-size: var(--font-text-xs-size, 12px) }
+#content.detail-expanded #history-pane { display: none }
+#content.detail-expanded #detail { width: 100%; max-width: none; height: 100%; border: 0 }
 #copy-hash { color: var(--muted) }
 #close-detail { margin-left: auto; color: var(--muted) }
 #detail-summary { padding: 12px; border-bottom: 1px solid var(--border); overflow: auto; max-height: 33%; flex-shrink: 0 }
@@ -129,16 +136,16 @@ button svg { width: 16px; height: 16px; flex: none }
 #diff-toolbar { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 2px 6px 2px 12px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border) }
 #diff-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-text-xs-size, 12px); color: var(--muted) }
 #open-file { flex: none; color: var(--muted) }
-#patch { flex: 1; min-height: 60px; overflow: auto; margin: 0; font-size: var(--font-text-xs-size, 12px); line-height: 1.7; tab-size: 4; padding: 6px 0 }
-#patch .line { display: block; min-width: 100%; width: max-content; padding: 0 12px; white-space: pre }
-.line.add { background: var(--color-background-success, color-mix(in srgb, var(--success) 12%, var(--bg))); color: var(--success) }
-.line.remove { background: var(--color-background-danger, color-mix(in srgb, var(--danger) 12%, var(--bg))); color: var(--danger) }
-.line.hunk { color: var(--muted); background: var(--surface); margin: 4px 0 }
-.line.header { color: var(--muted) }
-#patch .notice { white-space: pre-wrap; width: auto; color: var(--muted); padding: 12px; display: block }
+#diff-mode { font-size: var(--font-text-xs-size, 12px); color: var(--muted) }
+#diff-revisions { display: flex; flex-wrap: wrap; gap: 4px 16px; padding: 4px 12px; color: var(--muted); font-size: var(--font-text-xs-size, 12px) }
+#diff-revisions span { overflow-wrap: anywhere }
+#diff-body { flex: 1; position: relative; min-height: 80px }
+#diff-editor { position: absolute; inset: 0; font-family: var(--font-mono, 'SFMono-Regular', Consolas, monospace); font-size: var(--font-text-xs-size, 12px) }
+#diff-notice { white-space: pre-wrap; color: var(--muted); padding: 12px; overflow: auto; height: 100% }
+#diff-status { min-height: 22px; flex-shrink: 0; padding: 3px 12px; color: var(--muted); font-size: var(--font-text-xs-size, 12px) }
 @media (max-width: 1000px) {
   #content { flex-direction: column }
-  #detail { width: 100%; max-width: none; min-width: 0; height: 50%; border-left: 0; border-top: 1px solid var(--border); flex-shrink: 0 }
+  #detail { width: 100%; max-width: none; min-width: 0; height: 60%; min-height: min(400px, calc(100% - 100px)); border-left: 0; border-top: 1px solid var(--border); flex-shrink: 0 }
   #detail-summary { max-height: 30%; padding: 8px 12px }
   #files { max-height: 22% }
   #history-pane { min-height: 100px }
@@ -165,14 +172,17 @@ button svg { width: 16px; height: 16px; flex: none }
   <div id="layout-error" class="error" role="alert" hidden><span></span><button id="layout-retry">重试</button></div>
   <div id="content">
     <section id="history-pane" aria-label="提交历史">
-      <div id="history-scroll"><div id="history-table"><div id="columns" class="columns" hidden><span aria-label="关系图"></span><span>提交</span><span>作者</span><span>日期</span><span>SHA</span></div><div id="rows" role="listbox" aria-label="Git 提交列表"></div></div><div id="empty" class="empty"><strong>正在读取当前任务的 Git 仓库</strong>浏览分支关系，选择提交查看文件差异。</div></div>
+      <div id="history-scroll"><div id="history-table"><div id="columns" class="columns" hidden><span aria-label="关系图"></span><span>提交</span><span>作者</span><span>日期</span><span>SHA</span></div><div id="rows" role="listbox" aria-multiselectable="true" aria-label="Git 提交列表" title="选择提交查看差异；按住 ⌘ / Ctrl 点击另一提交进行比较"></div></div><div id="empty" class="empty"><strong>正在读取当前任务的 Git 仓库</strong>浏览分支关系，选择提交查看文件差异。</div></div>
       <footer class="history-footer"><span id="history-status" role="status">正在读取当前任务仓库…</span><span class="readonly" title="Git Graph 0.2.1 · 所有 Git 操作只读">只读</span><button id="load-more" hidden>加载更多</button></footer>
     </section>
     <aside id="detail" aria-label="提交详情" hidden>
-      <div id="detail-header"><code id="detail-hash"></code><button id="copy-hash" title="复制完整提交 SHA">复制</button><button id="close-detail" aria-label="关闭提交详情">×</button></div>
+      <div id="detail-header"><code id="detail-hash"></code><button id="copy-hash" title="复制目标提交的完整 SHA">复制</button><button id="compare" aria-pressed="false" title="将当前提交作为基准，再选择目标提交">比较…</button><button id="swap-comparison" hidden title="交换基准与目标">交换</button><button id="expand-detail" aria-pressed="false" title="展开详情以查看差异">展开</button><button id="close-detail" aria-label="关闭提交详情">×</button></div>
+      <p id="compare-hint" hidden role="status">请选择另一条提交作为目标；也可按住 ⌘ / Ctrl 点击提交进行比较。</p>
       <div id="detail-summary"><div id="commit-refs"></div><p id="commit-message"></p><div id="commit-meta"></div><label id="parent-label" hidden>对比父提交<select id="parent" aria-label="选择对比的父提交"></select></label></div>
       <div class="files-label" id="files-label">变更文件</div><div id="files"></div>
-      <div id="diff-toolbar"><span id="diff-title">选择文件查看差异</span><button id="open-file" hidden disabled title="在 Codex 中打开工作区文件（当前内容）" aria-label="在 Codex 中打开工作区文件"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 3h6v6m0-6-8 8M8 4H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2v-3"/></svg></button></div><pre id="patch" tabindex="0" aria-label="文件差异"></pre>
+      <div id="diff-toolbar"><span id="diff-title">选择文件查看差异</span><select id="diff-mode" aria-label="差异视图" disabled><option value="inline">行内</option><option value="split">并排</option></select><button class="step" id="prev-change" disabled title="上一处差异" aria-label="上一处差异">↑</button><button class="step" id="next-change" disabled title="下一处差异" aria-label="下一处差异">↓</button><button id="open-file" hidden disabled title="在 Codex 中打开工作区文件（当前内容）" aria-label="在 Codex 中打开工作区文件"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 3h6v6m0-6-8 8M8 4H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2v-3"/></svg></button></div>
+      <div id="diff-revisions" hidden><span id="diff-original"></span><span id="diff-modified"></span></div>
+      <div id="diff-body"><div id="diff-editor" hidden></div><div id="diff-notice" hidden role="status"></div></div><div id="diff-status" role="status"></div>
     </aside>
   </div>
 </main>
