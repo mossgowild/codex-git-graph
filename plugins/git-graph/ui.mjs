@@ -5,7 +5,7 @@ import { columns, maxColumnWidth, widthsSchema } from './column-layout.mjs';
 
 const $ = id => document.getElementById(id);
 const app = new App({ name: 'Git Graph', version: '0.2.1' });
-const state = { repo: '', commits: [], refs: [], tips: [], selected: '', detail: null, file: '', matches: [], match: -1,
+const state = { repo: '', branch: '', historyNotice: '', parent: 0, commits: [], refs: [], tips: [], selected: '', detail: null, file: '', matches: [], match: -1,
   hasMore: false, historyVersion: 0, detailVersion: 0, diffVersion: 0, connected: false, loading: false };
 let retry = null;
 let columnWidths = {}, graphWidth = 20, layoutReady = false, layoutRetry = null;
@@ -141,8 +141,14 @@ function theme(context) {
   if (context['openai/interactionCursor']) document.documentElement.style.setProperty('--interaction-cursor', context['openai/interactionCursor']);
 }
 function refsLabel(ref) { return ref.name.replace(/^refs\/(heads|remotes|tags)\//, ''); }
+function refDisplayName(ref) {
+  const label = refsLabel(ref);
+  if (state.refCounts.get(label) < 2) return label;
+  const kind = ref.name.startsWith('refs/heads/') ? '本地' : ref.name.startsWith('refs/remotes/') ? '远程' : '标签';
+  return `${kind} · ${label}`;
+}
 function refBadge(ref) {
-  const label = node('span', refsLabel(ref), `ref${ref.name.startsWith('refs/tags/') ? ' tag' : ''}`);
+  const label = node('span', refDisplayName(ref), `ref${ref.name.startsWith('refs/tags/') ? ' tag' : ''}`);
   label.title = ref.name;
   return label;
 }
@@ -153,10 +159,17 @@ function renderCommitRefs() {
     : [node('span', '无分支或标签直接指向此提交')]));
 }
 
-function acceptHistory(data, append = false) {
+function acceptHistory(data, append = false, notice = '') {
   state.repo = data.repo;
   state.commits = append ? [...state.commits, ...data.commits] : data.commits;
   state.refs = data.refs;
+  state.branch = data.branch;
+  state.historyNotice = data.missingBranch ? `所选分支或标签“${refsLabel({ name: data.missingBranch })}”已不存在，已显示所有分支与标签` : notice;
+  state.refCounts = new Map();
+  for (const ref of state.refs) {
+    const label = refsLabel(ref);
+    state.refCounts.set(label, (state.refCounts.get(label) || 0) + 1);
+  }
   state.tips = data.tips;
   state.hasMore = data.hasMore;
   state.head = data.head;
@@ -166,42 +179,59 @@ function acceptHistory(data, append = false) {
   $('toolbar').hidden = false;
   $('searchbar').hidden = false;
   $('columns').hidden = !state.commits.length;
-  const branch = $('branch').value;
   $('branch').replaceChildren(new Option('所有分支与标签', ''));
   const groups = [['本地分支', 'refs/heads/'], ['远程分支', 'refs/remotes/'], ['标签', 'refs/tags/']];
   for (const [label, prefix] of groups) {
     const refs = data.refs.filter(ref => ref.name.startsWith(prefix));
     if (!refs.length) continue;
     const group = node('optgroup'); group.label = label; group.append(node('legend', label));
-    for (const ref of refs) group.append(new Option(refsLabel(ref), ref.name));
+    for (const ref of refs) group.append(new Option(refDisplayName(ref), ref.name));
     $('branch').append(group);
   }
-  if ([...$('branch').options].some(option => option.value === branch)) $('branch').value = branch;
+  $('branch').value = state.branch;
   renderHistory();
   if (state.selected && !state.commits.some(commit => commit.hash === state.selected)) closeDetail();
 }
 
-async function loadHistory(append = false) {
+async function loadHistory(append = false, branch = $('branch').value) {
+  if (append && (state.loading || !state.hasMore)) return;
   const version = ++state.historyVersion;
+  const switching = branch !== state.branch;
+  if (switching) closeDetail();
   state.loading = true;
+  $('branch').value = branch;
+  $('history-table').hidden = switching;
+  $('searchbar').inert = switching;
+  $('empty').hidden = true;
   $('history-status').textContent = '正在读取提交历史…';
   $('load-more').disabled = true;
   $('error').hidden = true;
   try {
-    const args = { branch: $('branch').value || '' };
+    const args = { branch };
     if (append) { args.offset = state.commits.length; args.tips = state.tips; }
-    const result = await call('git_graph_history', args);
+    let result = await call('git_graph_history', args);
     if (version !== state.historyVersion) return;
-    acceptHistory(result, append);
+    let notice = '';
+    if (append && !result.missingBranch && (result.head !== state.head || result.headName !== state.headName
+      || JSON.stringify(result.refs) !== JSON.stringify(state.refs))) {
+      result = await call('git_graph_history', { branch });
+      if (version !== state.historyVersion) return;
+      append = false;
+      notice = '仓库引用已更新，已重新加载';
+    }
+    if (result.missingBranch) append = false;
+    acceptHistory(result, append, notice);
     if (!append) $('history-scroll').scrollTop = 0;
-    if (state.selected && !append && !$('detail').hidden) selectCommit(state.selected);
+    if (state.selected && !append && !$('detail').hidden) selectCommit(state.selected, state.parent, false, state.file);
   } catch (e) {
     if (version !== state.historyVersion) return;
+    $('branch').value = state.branch;
+    $('empty').hidden = state.commits.length > 0;
     $('history-status').textContent = '读取失败';
-    error(e.message, () => loadHistory(append));
+    error(e.message, () => loadHistory(append, branch));
   } finally {
     if (version === state.historyVersion) {
-      state.loading = false; $('load-more').disabled = false;
+      state.loading = false; $('load-more').disabled = false; $('history-table').hidden = false; $('searchbar').inert = false;
     }
   }
 }
@@ -256,7 +286,7 @@ function renderHistory() {
   $('empty').hidden = state.commits.length > 0;
   if (!state.commits.length) $('empty').replaceChildren(node('strong', '这个仓库还没有提交'), node('span', '创建提交后点击刷新。'));
   $('load-more').hidden = !state.hasMore;
-  $('history-status').textContent = `${state.commits.length} 条提交${state.hasMore ? ' · 可继续加载' : ' · 已加载全部'}${state.headName ? ` · 当前检出分支：${state.headName}` : state.head ? ` · 当前检出：分离的 HEAD（${state.head.slice(0, 7)}）` : ''}`;
+  $('history-status').textContent = `${state.commits.length} 条提交${state.hasMore ? ' · 可继续加载' : ' · 已加载全部'}${state.headName ? ` · 当前检出分支：${state.headName}` : state.head ? ` · 当前检出：分离的 HEAD（${state.head.slice(0, 7)}）` : ''}${state.historyNotice ? ` · ${state.historyNotice}` : ''}`;
   if (state.selected) renderCommitRefs();
   updateSearch();
 }
@@ -289,10 +319,10 @@ function closeDetail(resetSelection = true) {
   if (!state.selected && $('rows').firstElementChild) $('rows').firstElementChild.tabIndex = 0;
   updateSearch();
 }
-async function selectCommit(hash, parent = 0, focus = false) {
+async function selectCommit(hash, parent = 0, focus = false, file = '') {
   const version = ++state.detailVersion; ++state.diffVersion;
   $('error').hidden = true;
-  state.selected = hash; state.detail = null; state.file = '';
+  state.selected = hash; state.parent = parent; state.detail = null; state.file = file;
   for (const row of $('rows').children) {
     const selected = row.dataset.hash === hash;
     row.setAttribute('aria-selected', String(selected)); row.tabIndex = selected ? 0 : -1;
@@ -324,11 +354,11 @@ async function selectCommit(hash, parent = 0, focus = false) {
       if (slash !== -1) button.append(node('span', file.path.slice(0, slash), 'file-directory'));
       button.append(node('span', file.status[0], `file-status ${file.status[0]}`)); $('files').append(button);
     }
-    if (detail.files.length) await selectFile(detail.files[0].path);
+    if (detail.files.length) await selectFile(detail.files.some(item => item.path === file) ? file : detail.files[0].path);
     else $('patch').append(node('span', '相对所选父提交没有文件变更。', 'notice'));
   } catch (e) {
     if (version !== state.detailVersion) return;
-    $('commit-message').textContent = '提交读取失败'; error(e.message, () => selectCommit(hash, parent));
+    $('commit-message').textContent = '提交读取失败'; error(e.message, () => selectCommit(hash, parent, false, file));
   }
 }
 async function selectFile(path) {
@@ -346,9 +376,13 @@ async function selectFile(path) {
     const result = await call('git_graph_diff', { hash: detail.hash, parent: detail.parent, path });
     if (version !== state.diffVersion) return;
     const fragment = document.createDocumentFragment();
+    let inHunk = false;
     for (const text of result.patch.split('\n')) {
-      const type = text.startsWith('@@') ? 'hunk' : /^(diff |index |---|\+\+\+|rename |similarity |new file|deleted file|Binary)/.test(text)
-        ? 'header' : text.startsWith('+') ? 'add' : text.startsWith('-') ? 'remove' : '';
+      if (text.startsWith('diff ')) inHunk = false;
+      let type = '';
+      if (text.startsWith('@@')) { inHunk = true; type = 'hunk'; }
+      else if (inHunk) type = text.startsWith('+') ? 'add' : text.startsWith('-') ? 'remove' : '';
+      else if (/^(diff |index |---|\+\+\+|rename |similarity |new file|deleted file|Binary)/.test(text)) type = 'header';
       fragment.append(node('span', text || ' ', `line ${type}`));
     }
     $('patch').replaceChildren(fragment); $('patch').scrollTop = 0; $('patch').scrollLeft = 0;
@@ -374,7 +408,7 @@ async function openWorkspaceFile() {
   }
 }
 
-$('branch').addEventListener('change', () => { closeDetail(); loadHistory(); });
+$('branch').addEventListener('change', () => loadHistory());
 $('refresh').addEventListener('click', () => loadHistory());
 $('load-more').addEventListener('click', () => { if (!state.loading) loadHistory(true); });
 $('search').addEventListener('input', updateSearch);
@@ -418,10 +452,10 @@ app.ontoolresult = result => {
   const data = result.structuredContent;
   if (data?.repo && data.commits) {
     ++state.historyVersion; closeDetail(); acceptHistory(data);
-    state.loading = false; $('load-more').disabled = false;
+    state.loading = false; $('load-more').disabled = false; $('history-table').hidden = false; $('searchbar').inert = false;
   } else if (data?.contextCwd) {
     ++state.historyVersion; closeDetail();
-    state.repo = ''; state.commits = []; state.refs = []; state.tips = []; state.hasMore = false;
+    state.repo = ''; state.branch = ''; state.historyNotice = ''; state.commits = []; state.refs = []; state.tips = []; state.hasMore = false;
     $('rows').replaceChildren(); $('toolbar').hidden = true; $('searchbar').hidden = true; $('columns').hidden = true;
     $('load-more').hidden = true;
     $('repo-label').textContent = ''; $('repo-label').title = data.contextCwd;

@@ -33762,7 +33762,12 @@ async function history({ repoPath, branch = "", offset = 0, tips, limit = 250 })
     if (error62.cause?.code !== 1) throw error62;
     return "";
   })).trim();
-  if (branch && !refs.some((ref) => ref.name === branch)) throw new Error("\u5206\u652F\u5DF2\u4E0D\u5B58\u5728\uFF0C\u8BF7\u5237\u65B0\u4ED3\u5E93\u3002");
+  const missingBranch = branch && !refs.some((ref) => ref.name === branch) ? branch : "";
+  if (missingBranch) {
+    branch = "";
+    offset = 0;
+    tips = void 0;
+  }
   const selected = branch ? refs.filter((ref) => ref.name === branch) : refs;
   const resolved = [];
   if (!tips) {
@@ -33786,7 +33791,7 @@ async function history({ repoPath, branch = "", offset = 0, tips, limit = 250 })
     "--"
   ]) : "";
   const commits = parseCommits(raw);
-  return { repo, head, headName, refs, tips: snapshot, offset, commits: commits.slice(0, limit), hasMore: commits.length > limit };
+  return { repo, head, headName, refs, branch, missingBranch, tips: snapshot, offset, commits: commits.slice(0, limit), hasMore: commits.length > limit };
 }
 async function verifyCommit(repo, hash3) {
   if (!objectId.test(hash3)) throw new Error("\u63D0\u4EA4 ID \u65E0\u6548\u3002");

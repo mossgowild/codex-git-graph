@@ -1,10 +1,11 @@
 import { createServer } from 'node:http';
-import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
+import { readFile, writeFile, mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import assert from 'node:assert/strict';
+import { git } from './git.mjs';
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = import.meta.dirname;
 const require = createRequire(`${root}/package.json`);
@@ -20,7 +21,17 @@ await createServer({preferencesDirectory:${JSON.stringify(data)}}).connect(new S
 const client = new Client({ name: 'layout-ui-check', version: '1.0.0' });
 await client.connect(new StdioClientTransport({ command: process.execPath, args: [runner], cwd: root }));
 let failSave = false;
-let historyFixture;
+let historyFixture, historyClient, intercept;
+async function callTool(request) {
+  if (intercept) { const result=await intercept(request); if (result) return result; }
+  if (historyClient) return historyClient.callTool(['git_graph','git_graph_history'].includes(request.name)
+    ? {name:'git_graph_history',arguments:{...request.arguments,limit:2}} : request);
+  const commit=historyFixture?.commits.find(commit=>commit.hash===request.arguments?.hash);
+  if (historyFixture&&['git_graph','git_graph_history'].includes(request.name)) return {content:[],structuredContent:historyFixture};
+  if (commit&&request.name==='git_graph_commit') return {content:[],structuredContent:{...commit,message:commit.subject,files:[],parent:0}};
+  if (failSave&&request.name==='git_graph_save_layout') return {isError:true,content:[{type:'text',text:'模拟存储不可写'}]};
+  return client.callTool(request);
+}
 const script = `import {AppBridge,PostMessageTransport} from '@modelcontextprotocol/ext-apps/app-bridge';
 const frame=document.querySelector('iframe');
 const variables={'--color-background-primary':'#0d1117','--color-background-secondary':'#292d33','--color-text-primary':'#e6edf3','--color-text-secondary':'#7d838b','--color-border-secondary':'#23282f','--color-ring-primary':'#76a7f3','--font-sans':'system-ui','--font-text-sm-size':'13px','--font-text-xs-size':'12px'};
@@ -36,10 +47,7 @@ const server = createServer(async (req,res)=>{
     if(req.url==='/call') {
       let text='';for await(const part of req)text+=part;
       const request=JSON.parse(text);
-      const commit=historyFixture?.commits.find(commit=>commit.hash===request.arguments?.hash);
-      const result=historyFixture&&['git_graph','git_graph_history'].includes(request.name)?{content:[],structuredContent:historyFixture}:
-        commit&&request.name==='git_graph_commit'?{content:[],structuredContent:{...commit,message:commit.subject,files:[],parent:0}}:
-        failSave&&request.name==='git_graph_save_layout'?{isError:true,content:[{type:'text',text:'模拟存储不可写'}]}:await client.callTool(request);
+      const result=await callTool(request);
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify(result));return;
     }
     if(req.url==='/host.js'){res.setHeader('Content-Type','text/javascript');res.end(built.outputFiles[0].text);return;}
@@ -133,7 +141,7 @@ try {
   const branchNames=['codex/web-formily-before-dev-20260918','codex/web-formily-schema'];
   const commits=branchNames.map((name,index)=>({hash:String(index+1).repeat(40),parents:[],author:'Graph Test',
     email:'graph@example.invalid',date:'2026-09-19T00:00:00Z',subject:'refactor: align project structure with current conventions'}));
-  historyFixture={repo:root,head:commits[1].hash,headName:branchNames[1],hasMore:false,tips:commits.map(commit=>commit.hash),commits,
+  historyFixture={repo:root,branch:'',missingBranch:'',head:commits[1].hash,headName:branchNames[1],hasMore:false,tips:commits.map(commit=>commit.hash),commits,
     refs:branchNames.map((name,index)=>({name:`refs/heads/${name}`,hash:commits[index].hash,type:'commit',symbolic:''}))};
   await client.callTool({name:'git_graph_save_layout',arguments:{widths:{message:478,author:62}}});
   frame=await open();
@@ -173,8 +181,142 @@ try {
   await frame.locator('#commit-refs').getByText('无分支或标签直接指向此提交',{exact:true}).waitFor();
   assert.equal(await frame.locator('#commit-refs .ref').count(),0,'unreferenced commits must not inherit the checkout branch');
   assert.equal(await frame.locator('#history-status').textContent(),`2 条提交 · 已加载全部 · 当前检出：分离的 HEAD（${commits[0].hash.slice(0,7)}）`);
+  // Exercise history transitions against a real, isolated repository via the bundled MCP server.
+  {
+    const repo=join(temporary,'repo');
+    await mkdir(repo);await git(repo,['init','-b','main']);
+    for (const [key,value] of [['user.name','Graph Test'],['user.email','graph@example.invalid'],['commit.gpgsign','false'],['core.hooksPath','/dev/null']]) await git(repo,['config',key,value]);
+    const save=async(name,contents,message)=>{
+      await writeFile(join(repo,name),contents);await git(repo,['add','--',name]);await git(repo,['commit','-m',message]);
+      return (await git(repo,['rev-parse','HEAD'])).trim();
+    };
+    await writeFile(join(repo,'extra.txt'),'extra\n');await git(repo,['add','extra.txt']);
+    const base=await save('base.txt','root\n--old\n-- old header lookalike\n','Root');
+    await git(repo,['checkout','-b','side']);
+    const side=await save('side.txt','side\n','Side');
+    await git(repo,['checkout','main']);
+    const main=await save('base.txt','root\n++new\n++ new header lookalike\n','Main');
+    await git(repo,['merge','--no-ff','side','-m','Merge side']);
+    const merge=(await git(repo,['rev-parse','HEAD'])).trim();
+    await git(repo,['checkout','-b','topic',base]);
+    await save('topic.txt','one\n','Topic 1');
+    await save('topic.txt','two\n','Topic 2');
+    const topic=await save('topic.txt','three\n','Topic 3');
+    await git(repo,['checkout','main']);
+    await git(repo,['branch','release',main]);await git(repo,['tag','release',side]);
+    await git(repo,['branch','origin/main',main]);await git(repo,['update-ref','refs/remotes/origin/main',side]);
+    historyFixture=undefined;
+    historyClient=new Client({name:'history-ui-check',version:'1.0.0'});
+    await historyClient.connect(new StdioClientTransport({command:process.execPath,args:[runner],cwd:repo}));
+    await page.setViewportSize({width:1000,height:850});
+    const reopen=async()=>{intercept=null;frame=await open();};
+    const settled=()=>frame.locator('#history-status').getByText('条提交',{exact:false}).waitFor();
+    const selectMain=async()=>{await frame.locator('#branch').selectOption('refs/heads/main');await settled();};
+    const loadAllMain=async()=>{await selectMain();await frame.locator('#load-more').click();await frame.locator('#history-status').getByText('4 条提交',{exact:false}).waitFor();};
+
+    // A failed filter restores the loaded filter, while retry keeps the requested filter.
+    await reopen();await selectMain();
+    const oldRows=await frame.locator('.commit-row').evaluateAll(rows=>rows.map(row=>row.dataset.hash));
+    intercept=async request=>request.name==='git_graph_history'&&request.arguments.branch==='refs/heads/topic'
+      ?{isError:true,content:[{type:'text',text:'模拟读取失败'}]}:null;
+    await frame.locator('#branch').selectOption('refs/heads/topic');await frame.locator('#error').waitFor({state:'visible'});
+    assert.equal(await frame.locator('#branch').inputValue(),'refs/heads/main');
+    assert.deepEqual(await frame.locator('.commit-row').evaluateAll(rows=>rows.map(row=>row.dataset.hash)),oldRows);
+    intercept=null;await frame.locator('#retry').click();await frame.locator(`[data-hash="${topic}"]`).waitFor();
+    assert.equal(await frame.locator('#branch').inputValue(),'refs/heads/topic');
+    await selectMain();
+    intercept=async request=>request.name==='git_graph_history'&&request.arguments.branch==='refs/heads/topic'
+      ?{isError:true,content:[{type:'text',text:'模拟读取失败'}]}:null;
+    await frame.locator('#branch').selectOption('refs/heads/topic');await frame.locator('#error').waitFor({state:'visible'});
+    await frame.locator('#load-more').click();await frame.locator('#history-status').getByText('4 条提交',{exact:false}).waitFor();
+    assert.equal(await frame.locator('#branch').inputValue(),'refs/heads/main');
+    assert.equal(await frame.locator(`[data-hash="${topic}"]`).count(),0);
+
+    // Refresh retains both the comparison parent and a non-first selected file.
+    await reopen();await loadAllMain();
+    await frame.locator(`[data-hash="${merge}"]`).click();await frame.locator('#parent').selectOption('1');
+    await frame.locator('#files-label').getByText('相对父提交 2',{exact:false}).waitFor();
+    await frame.locator('#refresh').click();await settled();
+    await frame.locator('#commit-meta').getByText('Graph Test',{exact:false}).waitFor();
+    assert.equal(await frame.locator('#parent').inputValue(),'1');
+    assert.equal(await frame.locator('#diff-title').innerText(),'base.txt');
+    await frame.locator('#load-more').click();await frame.locator(`[data-hash="${base}"]`).click();
+    await frame.locator('#files button[data-path="extra.txt"]').click();
+    // Filter to the root to keep this selection in the refreshed first page.
+    await git(repo,['branch','root-only',base]);
+    await frame.locator('#refresh').click();await settled();
+    await frame.locator('#branch').selectOption('refs/heads/root-only');await settled();
+    await frame.locator(`[data-hash="${base}"]`).click();await frame.locator('#files button[data-path="extra.txt"]').click();
+    await frame.locator('#refresh').click();await settled();
+    await frame.locator('#patch .add').getByText('+extra',{exact:true}).waitFor();
+    assert.equal(await frame.locator('#files button[aria-pressed="true"]').getAttribute('data-path'),'extra.txt');
+    await frame.locator('#close-detail').click();await frame.locator('#refresh').click();await settled();
+    assert.equal(await frame.locator('#detail').isVisible(),false);
+
+    // Deleted filters recover explicitly on both refresh and pagination.
+    for (const button of ['refresh','load-more']) {
+      await reopen();await frame.locator('#branch').selectOption('refs/heads/topic');await settled();
+      await git(repo,['branch','-D','topic']);await frame.locator(`#${button}`).click();
+      await frame.locator('#history-status').getByText('已显示所有分支与标签',{exact:false}).waitFor();
+      assert.equal(await frame.locator('#branch').inputValue(),'');
+      assert.equal(await frame.locator('#branch option[value="refs/heads/topic"]').count(),0);
+      assert.equal(await frame.locator('#error').isVisible(),false);
+      await git(repo,['branch','topic',topic]);
+    }
+
+    // Namespaces remain distinguishable in the picker, timeline and detail.
+    await reopen();
+    const names=['refs/heads/release','refs/tags/release','refs/heads/origin/main','refs/remotes/origin/main'];
+    const labels=['本地 · release','标签 · release','本地 · origin/main','远程 · origin/main'];
+    for (const [index,name] of names.entries()) {
+      await frame.locator('#branch').selectOption(name);await settled();
+      assert.equal(await frame.locator('#branch').evaluate(el=>el.selectedOptions[0].textContent),labels[index]);
+      const badge=frame.locator(`#rows .ref[title="${name}"]`);
+      assert.equal(await badge.innerText(),labels[index]);await badge.click();
+      assert.equal(await frame.locator(`#commit-refs .ref[title="${name}"]`).innerText(),labels[index]);
+    }
+
+    // Hunk content resembling file headers still receives addition/deletion colors.
+    await reopen();await loadAllMain();await frame.locator(`[data-hash="${main}"]`).click();
+    await frame.locator('#patch .line').getByText('+++new',{exact:true}).waitFor();
+    for (const text of ['+++new','+++ new header lookalike']) assert.equal(await frame.locator('#patch .add').getByText(text,{exact:true}).count(),1);
+    for (const text of ['---old','--- old header lookalike']) assert.equal(await frame.locator('#patch .remove').getByText(text,{exact:true}).count(),1);
+    assert.equal(await frame.locator('#patch .header').getByText('+++ b/base.txt',{exact:true}).count(),1);
+
+    // Changing refs between pages reloads a coherent history, including HEAD.
+    await reopen();await selectMain();
+    const added=await save('new.txt','new\n','New commit during pagination');
+    await frame.locator('#load-more').click();await frame.locator(`[data-hash="${added}"]`).waitFor();
+    assert.equal(await frame.locator(`[data-hash="${added}"] .head`).count(),1);
+    assert.equal(await frame.locator(`[data-hash="${added}"] .ref[title="refs/heads/main"]`).count(),1);
+    assert.match(await frame.locator('#history-status').innerText(),/仓库引用已更新/);
+    assert.equal(await frame.locator('.commit-row').count(),2,'a new snapshot starts at its first page');
+    await frame.locator('#load-more').click();await frame.locator('#history-status').getByText('4 条提交',{exact:false}).waitFor();
+    assert.equal(new Set(await frame.locator('.commit-row').evaluateAll(rows=>rows.map(row=>row.dataset.hash))).size,4);
+
+    // A delayed old filter cannot expose the wrong rows or replace the newer result.
+    await reopen();
+    let release,entered;
+    const held=new Promise(resolve=>release=resolve),started=new Promise(resolve=>entered=resolve);
+    intercept=async request=>{
+      if(request.name==='git_graph_history'&&request.arguments.branch==='refs/heads/main') {
+        const result=await historyClient.callTool({...request,arguments:{...request.arguments,limit:2}});
+        entered();await held;return result;
+      }
+    };
+    await frame.locator('#branch').selectOption('refs/heads/main');await started;
+    assert.equal(await frame.locator('#history-table').isVisible(),false);
+    assert.equal(await frame.locator('#searchbar').evaluate(element=>element.inert),true);
+    await frame.locator('#branch').selectOption('refs/heads/topic');await frame.locator(`[data-hash="${topic}"]`).waitFor();
+    const delayed=page.waitForResponse(response=>response.url().endsWith('/call')&&response.request().postDataJSON().arguments?.branch==='refs/heads/main');
+    release();await (await delayed).finished();await page.waitForTimeout(50);
+    assert.equal(await frame.locator('#branch').inputValue(),'refs/heads/topic');
+    assert.equal(await frame.locator(`[data-hash="${added}"]`).count(),0);
+    assert.equal(await frame.locator('#history-table').isVisible(),true);
+    assert.equal(await frame.locator('#searchbar').evaluate(element=>element.inert),false);
+  }
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({passed:true,checks:['author-first drag','date-first drag','hash-first drag','graph-first drag','drag','keyboard','alignment','refresh','new-page persistence','cancel','narrow scroll','save retry','double-click reset','Home reset','light theme','long branch names','checkout vs selected refs','keyboard refs','ref refresh','no direct refs','detached HEAD'],original,changed}));
+  console.log(JSON.stringify({passed:true,checks:['author-first drag','date-first drag','hash-first drag','graph-first drag','drag','keyboard','alignment','refresh','new-page persistence','cancel','narrow scroll','save retry','double-click reset','Home reset','light theme','long branch names','checkout vs selected refs','keyboard refs','ref refresh','no direct refs','detached HEAD','failed filter recovery','parent and file refresh','deleted filter recovery','reference namespaces','patch hunk colors','pagination context refresh','stale history responses'],original,changed}));
 }finally{
-  await browser?.close();server.closeAllConnections();server.close();await client.close();await rm(temporary,{recursive:true,force:true});
+  await browser?.close();server.closeAllConnections();server.close();await client.close();await historyClient?.close();await rm(temporary,{recursive:true,force:true});
 }

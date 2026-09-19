@@ -57,7 +57,8 @@ export async function history({ repoPath, branch = '', offset = 0, tips, limit =
     if (error.cause?.code !== 1) throw error;
     return '';
   })).trim();
-  if (branch && !refs.some(ref => ref.name === branch)) throw new Error('分支已不存在，请刷新仓库。');
+  const missingBranch = branch && !refs.some(ref => ref.name === branch) ? branch : '';
+  if (missingBranch) { branch = ''; offset = 0; tips = undefined; }
   const selected = branch ? refs.filter(ref => ref.name === branch) : refs;
   const resolved = [];
   if (!tips) {
@@ -72,7 +73,7 @@ export async function history({ repoPath, branch = '', offset = 0, tips, limit =
   const raw = snapshot.length ? await git(repo, ['log', '--topo-order', '--no-show-signature', '-z',
     '--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%s', `--skip=${offset}`, `--max-count=${limit + 1}`, ...snapshot, '--']) : '';
   const commits = parseCommits(raw);
-  return { repo, head, headName, refs, tips: snapshot, offset, commits: commits.slice(0, limit), hasMore: commits.length > limit };
+  return { repo, head, headName, refs, branch, missingBranch, tips: snapshot, offset, commits: commits.slice(0, limit), hasMore: commits.length > limit };
 }
 
 async function verifyCommit(repo, hash) {
