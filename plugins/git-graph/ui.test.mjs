@@ -36,7 +36,9 @@ const server = createServer(async (req,res)=>{
     if(req.url==='/call') {
       let text='';for await(const part of req)text+=part;
       const request=JSON.parse(text);
-      const result=historyFixture&&request.name==='git_graph'?{content:[],structuredContent:historyFixture}:
+      const commit=historyFixture?.commits.find(commit=>commit.hash===request.arguments?.hash);
+      const result=historyFixture&&['git_graph','git_graph_history'].includes(request.name)?{content:[],structuredContent:historyFixture}:
+        commit&&request.name==='git_graph_commit'?{content:[],structuredContent:{...commit,message:commit.subject,files:[],parent:0}}:
         failSave&&request.name==='git_graph_save_layout'?{isError:true,content:[{type:'text',text:'模拟存储不可写'}]}:await client.callTool(request);
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify(result));return;
     }
@@ -131,14 +133,14 @@ try {
   const branchNames=['codex/web-formily-before-dev-20260918','codex/web-formily-schema'];
   const commits=branchNames.map((name,index)=>({hash:String(index+1).repeat(40),parents:[],author:'Graph Test',
     email:'graph@example.invalid',date:'2026-09-19T00:00:00Z',subject:'refactor: align project structure with current conventions'}));
-  historyFixture={repo:root,head:'',headName:'',hasMore:false,tips:commits.map(commit=>commit.hash),commits,
+  historyFixture={repo:root,head:commits[1].hash,headName:branchNames[1],hasMore:false,tips:commits.map(commit=>commit.hash),commits,
     refs:branchNames.map((name,index)=>({name:`refs/heads/${name}`,hash:commits[index].hash,type:'commit',symbolic:''}))};
   await client.callTool({name:'git_graph_save_layout',arguments:{widths:{message:478,author:62}}});
   frame=await open();
   for (const width of [1000,400]) {
     await page.setViewportSize({width,height:760});
-    assert.deepEqual(await frame.locator('.ref').allTextContents(),branchNames);
-    const labels=await frame.locator('.ref').evaluateAll(elements=>elements.map(label=>({
+    assert.deepEqual(await frame.locator('#rows .ref:not(.head)').allTextContents(),branchNames);
+    const labels=await frame.locator('#rows .ref:not(.head)').evaluateAll(elements=>elements.map(label=>({
       name:label.textContent,visible:label.clientWidth,content:label.scrollWidth,
       insideMessage:label.getBoundingClientRect().right<=label.parentElement.getBoundingClientRect().right,
     })));
@@ -146,8 +148,33 @@ try {
       `branch names must remain distinguishable at ${width}px: ${JSON.stringify(labels)}`);
     await aligned();
   }
+  const status=`2 条提交 · 已加载全部 · 当前检出分支：${branchNames[1]}`;
+  assert.equal(await frame.locator('#history-status').textContent(),status);
+  for (const [index,commit] of commits.entries()) {
+    await frame.locator(`[data-hash="${commit.hash}"]`).click();
+    await frame.locator('#commit-message').getByText(commit.subject,{exact:true}).waitFor();
+    assert.equal(await frame.locator('#detail-hash').textContent(),commit.hash.slice(0,12));
+    assert.deepEqual(await frame.locator('#commit-refs .ref').allTextContents(),[branchNames[index]]);
+    assert.equal(await frame.locator('#commit-refs .ref').getAttribute('title'),`refs/heads/${branchNames[index]}`);
+    assert.equal(await frame.locator('#history-status').textContent(),status,'selection must not change the checkout context');
+    assert.equal(await frame.locator('#commit-refs').evaluate(element=>element.scrollWidth<=element.clientWidth),true);
+  }
+  // Keyboard selection and refreshed refs must update the same detail display.
+  await frame.locator(`[data-hash="${commits[1].hash}"]`).press('ArrowUp');
+  await frame.locator('#commit-refs').getByText(branchNames[0],{exact:true}).waitFor();
+  historyFixture.refs.push({name:`refs/remotes/origin/${branchNames[0]}`,hash:commits[0].hash},
+    {name:'refs/tags/v1.0.0',hash:commits[0].hash});
+  await frame.locator('#refresh').click();
+  await frame.locator('#commit-refs .tag').waitFor();
+  assert.deepEqual(await frame.locator('#commit-refs .ref').allTextContents(),[branchNames[0],`origin/${branchNames[0]}`,'v1.0.0']);
+  historyFixture.refs=historyFixture.refs.filter(ref=>ref.hash!==commits[0].hash);
+  historyFixture.head=commits[0].hash;historyFixture.headName='';
+  await frame.locator('#refresh').click();
+  await frame.locator('#commit-refs').getByText('无分支或标签直接指向此提交',{exact:true}).waitFor();
+  assert.equal(await frame.locator('#commit-refs .ref').count(),0,'unreferenced commits must not inherit the checkout branch');
+  assert.equal(await frame.locator('#history-status').textContent(),`2 条提交 · 已加载全部 · 当前检出：分离的 HEAD（${commits[0].hash.slice(0,7)}）`);
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({passed:true,checks:['author-first drag','date-first drag','hash-first drag','graph-first drag','drag','keyboard','alignment','refresh','new-page persistence','cancel','narrow scroll','save retry','double-click reset','Home reset','light theme','long branch names'],original,changed}));
+  console.log(JSON.stringify({passed:true,checks:['author-first drag','date-first drag','hash-first drag','graph-first drag','drag','keyboard','alignment','refresh','new-page persistence','cancel','narrow scroll','save retry','double-click reset','Home reset','light theme','long branch names','checkout vs selected refs','keyboard refs','ref refresh','no direct refs','detached HEAD'],original,changed}));
 }finally{
   await browser?.close();server.closeAllConnections();server.close();await client.close();await rm(temporary,{recursive:true,force:true});
 }

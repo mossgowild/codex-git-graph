@@ -141,6 +141,17 @@ function theme(context) {
   if (context['openai/interactionCursor']) document.documentElement.style.setProperty('--interaction-cursor', context['openai/interactionCursor']);
 }
 function refsLabel(ref) { return ref.name.replace(/^refs\/(heads|remotes|tags)\//, ''); }
+function refBadge(ref) {
+  const label = node('span', refsLabel(ref), `ref${ref.name.startsWith('refs/tags/') ? ' tag' : ''}`);
+  label.title = ref.name;
+  return label;
+}
+function renderCommitRefs() {
+  const refs = state.refs.filter(ref => ref.hash === state.selected);
+  $('commit-refs').replaceChildren(...(refs.length
+    ? [node('span', '指向此提交：'), ...refs.map(refBadge)]
+    : [node('span', '无分支或标签直接指向此提交')]));
+}
 
 function acceptHistory(data, append = false) {
   state.repo = data.repo;
@@ -232,10 +243,7 @@ function renderHistory() {
     button.append(graphSvg(row, width));
     const message = node('span', null, 'message');
     if (row.hash === state.head) message.append(node('span', 'HEAD', 'ref head'));
-    for (const ref of refs.get(row.hash) || []) {
-      const label = node('span', refsLabel(ref), `ref${ref.name.startsWith('refs/tags/') ? ' tag' : ''}`);
-      label.title = ref.name; message.append(label);
-    }
+    message.append(...(refs.get(row.hash) || []).map(refBadge));
     const subject = node('span', row.subject || '（无提交标题）', 'subject'); subject.title = row.subject;
     message.append(subject);
     const author = node('span', row.author, 'author'); author.title = `${row.author} <${row.email}>`;
@@ -248,7 +256,8 @@ function renderHistory() {
   $('empty').hidden = state.commits.length > 0;
   if (!state.commits.length) $('empty').replaceChildren(node('strong', '这个仓库还没有提交'), node('span', '创建提交后点击刷新。'));
   $('load-more').hidden = !state.hasMore;
-  $('history-status').textContent = `${state.commits.length} 条提交${state.hasMore ? ' · 可继续加载' : ' · 已加载全部'}${state.headName ? ` · ${state.headName}` : state.head ? ' · 分离的 HEAD' : ''}`;
+  $('history-status').textContent = `${state.commits.length} 条提交${state.hasMore ? ' · 可继续加载' : ' · 已加载全部'}${state.headName ? ` · 当前检出分支：${state.headName}` : state.head ? ` · 当前检出：分离的 HEAD（${state.head.slice(0, 7)}）` : ''}`;
+  if (state.selected) renderCommitRefs();
   updateSearch();
 }
 function updateSearch() {
@@ -291,6 +300,7 @@ async function selectCommit(hash, parent = 0, focus = false) {
   }
   updateSearch();
   $('detail').hidden = false; $('detail-hash').textContent = hash.slice(0, 12);
+  renderCommitRefs();
   $('commit-message').textContent = '正在读取提交…'; $('commit-meta').textContent = '';
   $('files').replaceChildren(); $('patch').replaceChildren(); $('parent-label').hidden = true;
   $('open-file').disabled = true;
