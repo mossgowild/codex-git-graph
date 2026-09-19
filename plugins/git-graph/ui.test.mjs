@@ -20,6 +20,7 @@ await createServer({preferencesDirectory:${JSON.stringify(data)}}).connect(new S
 const client = new Client({ name: 'layout-ui-check', version: '1.0.0' });
 await client.connect(new StdioClientTransport({ command: process.execPath, args: [runner], cwd: root }));
 let failSave = false;
+let historyFixture;
 const script = `import {AppBridge,PostMessageTransport} from '@modelcontextprotocol/ext-apps/app-bridge';
 const frame=document.querySelector('iframe');
 const variables={'--color-background-primary':'#0d1117','--color-background-secondary':'#292d33','--color-text-primary':'#e6edf3','--color-text-secondary':'#7d838b','--color-border-secondary':'#23282f','--color-ring-primary':'#76a7f3','--font-sans':'system-ui','--font-text-sm-size':'13px','--font-text-xs-size':'12px'};
@@ -35,7 +36,8 @@ const server = createServer(async (req,res)=>{
     if(req.url==='/call') {
       let text='';for await(const part of req)text+=part;
       const request=JSON.parse(text);
-      const result=failSave&&request.name==='git_graph_save_layout'?{isError:true,content:[{type:'text',text:'模拟存储不可写'}]}:await client.callTool(request);
+      const result=historyFixture&&request.name==='git_graph'?{content:[],structuredContent:historyFixture}:
+        failSave&&request.name==='git_graph_save_layout'?{isError:true,content:[{type:'text',text:'模拟存储不可写'}]}:await client.callTool(request);
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify(result));return;
     }
     if(req.url==='/host.js'){res.setHeader('Content-Type','text/javascript');res.end(built.outputFiles[0].text);return;}
@@ -126,8 +128,26 @@ try {
   await frame.locator('[data-column="message"]').press('Home');assert.equal((await widths())[1],original[1]-16);
   await page.evaluate(()=>window.light());
   await page.screenshot({path:join(temporary, 'light.png')});
+  const branchNames=['codex/web-formily-before-dev-20260918','codex/web-formily-schema'];
+  const commits=branchNames.map((name,index)=>({hash:String(index+1).repeat(40),parents:[],author:'Graph Test',
+    email:'graph@example.invalid',date:'2026-09-19T00:00:00Z',subject:'refactor: align project structure with current conventions'}));
+  historyFixture={repo:root,head:'',headName:'',hasMore:false,tips:commits.map(commit=>commit.hash),commits,
+    refs:branchNames.map((name,index)=>({name:`refs/heads/${name}`,hash:commits[index].hash,type:'commit',symbolic:''}))};
+  await client.callTool({name:'git_graph_save_layout',arguments:{widths:{message:478,author:62}}});
+  frame=await open();
+  for (const width of [1000,400]) {
+    await page.setViewportSize({width,height:760});
+    assert.deepEqual(await frame.locator('.ref').allTextContents(),branchNames);
+    const labels=await frame.locator('.ref').evaluateAll(elements=>elements.map(label=>({
+      name:label.textContent,visible:label.clientWidth,content:label.scrollWidth,
+      insideMessage:label.getBoundingClientRect().right<=label.parentElement.getBoundingClientRect().right,
+    })));
+    assert.ok(labels.every(label=>label.content<=label.visible&&label.insideMessage),
+      `branch names must remain distinguishable at ${width}px: ${JSON.stringify(labels)}`);
+    await aligned();
+  }
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({passed:true,checks:['author-first drag','date-first drag','hash-first drag','graph-first drag','drag','keyboard','alignment','refresh','new-page persistence','cancel','narrow scroll','save retry','double-click reset','Home reset','light theme'],original,changed}));
+  console.log(JSON.stringify({passed:true,checks:['author-first drag','date-first drag','hash-first drag','graph-first drag','drag','keyboard','alignment','refresh','new-page persistence','cancel','narrow scroll','save retry','double-click reset','Home reset','light theme','long branch names'],original,changed}));
 }finally{
   await browser?.close();server.closeAllConnections();server.close();await client.close();await rm(temporary,{recursive:true,force:true});
 }
